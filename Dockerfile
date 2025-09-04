@@ -7,7 +7,7 @@ ENV LC_ALL=C
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-    && apt-get install -y vim curl gnupg rsyslog net-tools sysstat iproute2 dnsutils tcpdump software-properties-common supervisor \
+    && apt-get install -y vim curl gnupg rsyslog net-tools less sysstat iproute2 dnsutils tcpdump software-properties-common supervisor \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
