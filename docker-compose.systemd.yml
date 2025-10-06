@@ -1,7 +1,7 @@
 services:
   testpoint:
     container_name: perfsonar-testpoint
-    image: perfsonar/testpoint:systemd
+    image: ghcr.io/perfsonar/testpoint:5.2.2-systemd
     build:
       context: .
       dockerfile: systemd/Dockerfile
@@ -9,12 +9,15 @@ services:
     environment:
       - TZ=UTC
     network_mode: "host"
-    restart: on-failure
+    restart: unless-stopped
     tmpfs:
       - /run
       - /run/lock
       - /tmp
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      - ./compose/psconfig:/etc/perfsonar/psconfig
+      - /opt/testpoint/psconfig:/etc/perfsonar/psconfig
     tty: true
+    pids_limit: 8192
+    cap_add:
+      - CAP_NET_RAW
