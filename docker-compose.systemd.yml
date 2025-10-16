@@ -1,7 +1,7 @@
 services:
   testpoint:
     container_name: perfsonar-testpoint
-    image: perfsonar/testpoint:systemd
+    image:  docker.io/perfsonar/testpoint:systemd
     build:
       context: .
       dockerfile: systemd/Dockerfile
