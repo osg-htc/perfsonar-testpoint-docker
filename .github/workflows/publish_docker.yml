@@ -30,7 +30,8 @@ on:
 env:
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
-  IMAGE_BASE: 'perfsonar/testpoint'
+  #IMAGE_BASE: 'perfsonar/testpoint'
+  IMAGE_BASE: 'osg-htc/testpoint'
   BUILD_DIR: .
 
 ##
