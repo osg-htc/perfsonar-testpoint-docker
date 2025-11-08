@@ -12,7 +12,6 @@ on:
         required: false
         default: "none"
   schedule:
-    # Optional: check daily for new upstream changes (you can remove if undesired)
     - cron: "23 6 * * *"
 
 env:
@@ -44,18 +43,16 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=""
-          # Prefer a VERSION file if upstream provides one
           if [ -f upstream/VERSION ]; then
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
-          # Fall back to latest annotated tag
           if [ -z "$VERSION" ]; then
             VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null || true)"
           fi
-          # Fallback if no tags exist (use date)
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
           fi
+            # Emit value for later steps
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Log version
@@ -70,7 +67,6 @@ jobs:
         id: readlabel
         run: |
           set -euo pipefail
-          # Try to read org.opencontainers.image.version from the upstream build
           LABEL_VERSION="$(docker inspect local/perfsonar-testpoint:${{ steps.meta.outputs.version }} \
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' || true)"
           if [ -n "$LABEL_VERSION" ] && [ "$LABEL_VERSION" != "<no value>" ]; then
@@ -79,7 +75,6 @@ jobs:
           else
             echo "version=${{ steps.meta.outputs.version }}" > version_override.env
           fi
-        shell: bash
 
       - name: Export final version
         id: finalver
@@ -89,14 +84,17 @@ jobs:
 
       - name: Build patched image
         run: |
+          set -eux
+          EXTRA_TAG=""
+          if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
+            EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
+          fi
           docker build \
             --build-arg BASE_IMAGE=local/perfsonar-testpoint:${{ steps.finalver.outputs.version }} \
             -f Dockerfile.patched \
             -t ${REGISTRY}/${IMAGE_REPO}:${{ steps.finalver.outputs.version }} \
             -t ${REGISTRY}/${IMAGE_REPO}:latest \
-            $( if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then \
-                  echo "-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"; \
-               fi ) \
+            ${EXTRA_TAG} \
             .
 
       - name: Login to Harbor
@@ -113,5 +111,5 @@ jobs:
         run: docker push ${REGISTRY}/${IMAGE_REPO}:latest
 
       - name: Push env tag (production/test) if requested
-        if: ${{ github.event.inputs.env_tag && github.event.inputs.env_tag != 'none' }}
+        if: ${{ github.event.inputs.env_tag != '' && github.event.inputs.env_tag != 'none' }}
         run: docker push ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}
