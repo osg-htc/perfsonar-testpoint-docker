@@ -1,31 +1,27 @@
-# Layers the Apache vhost changes onto the upstream-built image.
-# Upstream image must already exist locally as local/perfsonar-testpoint:<version>
-ARG BASE_IMAGE=scratch
+# Dockerfile.patched
+# Layers Apache restrictions (pure 2.4 syntax) onto the locally built upstream image.
+# Upstream image must exist locally as: local/perfsonar-testpoint:<version>
+
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-COPY patches/default-ssl.conf.patch /tmp/default-ssl.conf.patch
+# Snippet with OSG/CERN/AGLT2 restrictions (pure Apache 2.4)
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
 RUN set -eux; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2 patch; \
-    a2enmod proxy proxy_http access_compat; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2; \
+    a2enmod proxy proxy_http; \
     CONF=/etc/apache2/sites-available/default-ssl.conf; \
-    # Skip if block already present
     if grep -q 'BEGIN OSG restrictions' "$CONF"; then \
-        echo "OSG restrictions already present; skipping patch/injection"; \
+        echo "Restrictions already present; skipping injection"; \
     else \
-        if patch -l -f -F 3 "$CONF" < /tmp/default-ssl.conf.patch; then \
-            echo "Unified diff applied successfully"; \
-        else \
-            echo "Unified diff failed; injecting block after DocumentRoot"; \
-            awk 'NR==FNR{block=block $0 ORS; next} \
-                 {print} \
-                 /DocumentRoot[[:space:]]+\\/var\\/www\\/html/ && !done{print block; done=1}' \
-                /tmp/osg-restrictions.conf "$CONF" > "$CONF.new"; \
-            mv "$CONF.new" "$CONF"; \
-        fi; \
+        awk 'NR==FNR{block=block $0 ORS; next} \
+             /DocumentRoot[[:space:]]+\\/var\\/www\\/html/ && !done {print; print block; done=1; next} \
+             {print} \
+             END{if(!done){print block}}' /tmp/osg-restrictions.conf "$CONF" > "$CONF.new"; \
+        mv "$CONF.new" "$CONF"; \
     fi; \
     apache2ctl -t; \
-    rm -f /tmp/default-ssl.conf.patch /tmp/osg-restrictions.conf; \
+    rm -f /tmp/osg-restrictions.conf; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
