@@ -1,11 +1,8 @@
-# Dockerfile.patched
-# Layers Apache restrictions (pure 2.4 syntax) onto the locally built upstream image.
-# Upstream image must exist locally as: local/perfsonar-testpoint:<version>
-
+# Layers Apache 2.4 restrictions onto locally built upstream image.
+# You MUST pass --build-arg BASE_IMAGE=local/perfsonar-testpoint:<version>
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Snippet with OSG/CERN/AGLT2 restrictions (pure Apache 2.4)
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
 RUN set -eux; \
@@ -16,11 +13,14 @@ RUN set -eux; \
     if grep -q 'BEGIN OSG restrictions' "$CONF"; then \
         echo "Restrictions already present; skipping injection"; \
     else \
-        awk 'NR==FNR{block=block $0 ORS; next} \
-             /DocumentRoot[[:space:]]+\\/var\\/www\\/html/ && !done {print; print block; done=1; next} \
-             {print} \
-             END{if(!done){print block}}' /tmp/osg-restrictions.conf "$CONF" > "$CONF.new"; \
-        mv "$CONF.new" "$CONF"; \
+        # Find the first DocumentRoot line; insert after it. If not found, append.
+        DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
+        if [ -n "$DR_LINE" ]; then \
+            # sed: read (-r) the snippet after the matched line number
+            sed -i "${DR_LINE}r /tmp/osg-restrictions.conf" "$CONF"; \
+        else \
+            cat /tmp/osg-restrictions.conf >> "$CONF"; \
+        fi; \
     fi; \
     apache2ctl -t; \
     rm -f /tmp/osg-restrictions.conf; \
