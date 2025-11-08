@@ -32,70 +32,6 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Select final version (respect forced override)
-        id: version_select
-        shell: bash
-        run: |
-          set -euo pipefail
-          META='${{ steps.meta.outputs.version }}'
-          UPSTREAM_REF='${{ github.event.inputs.upstream_ref }}'
-          FORCE='${{ github.event.inputs.force_version }}'
-
-          echo "Derived META version: $META"
-          echo "User upstream_ref: $UPSTREAM_REF"
-          echo "User force_version: $FORCE"
-
-          # If user forces a version, take it directly.
-          if [ -n "$FORCE" ]; then
-            echo "Using forced version: $FORCE"
-            echo "version=$FORCE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # If upstream_ref is a tag and looks like a perfSONAR version pattern,
-          # prefer it unless META differs in a meaningful way.
-          is_semver_like() {
-            echo "$1" | grep -Eq '^[v]?[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
-          }
-
-          CHOSEN="$META"
-          if [ -n "$UPSTREAM_REF" ] && is_semver_like "$UPSTREAM_REF"; then
-            # Normalize leading v
-            N_REF="${UPSTREAM_REF#v}"
-            N_META="${META#v}"
-            if [ "$N_REF" != "$N_META" ]; then
-              echo "Overriding derived META version ($META) with upstream_ref tag ($UPSTREAM_REF)"
-              CHOSEN="$N_REF"
-            fi
-          fi
-
-          # Attempt OCI label only if it matches perfSONAR pattern and not a distro version.
-          RAW_LABEL="$(docker inspect local/perfsonar-testpoint:${META} \
-            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
-
-          echo "Raw OCI label: '$RAW_LABEL'"
-
-          is_perfsonar_label() {
-            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
-          }
-          is_distro_label() {
-            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+$'
-          }
-
-          if [ -n "$RAW_LABEL" ] && [ "$RAW_LABEL" != "<no value>" ]; then
-            if is_perfsonar_label "$RAW_LABEL"; then
-              echo "Using OCI label as final version: $RAW_LABEL"
-              CHOSEN="$RAW_LABEL"
-            elif is_distro_label "$RAW_LABEL"; then
-              echo "Ignoring OCI label '$RAW_LABEL' (distro-style version)"
-            else
-              echo "Ignoring OCI label '$RAW_LABEL' (unrecognized pattern)"
-            fi
-          fi
-
-          echo "Final chosen version: $CHOSEN"
-          echo "version=$CHOSEN" >> "$GITHUB_OUTPUT"
-
       - name: Clone upstream source
         shell: bash
         run: |
@@ -137,39 +73,62 @@ jobs:
           META='${{ steps.meta.outputs.version }}'
           docker build -t "local/perfsonar-testpoint:${META}" ./upstream
 
-      - name: Prefer upstream OCI version label if present
-        id: readlabel
-        shell: bash
-        run: |
-          set -euo pipefail
-          LABEL_VERSION="$(docker inspect \
-            local/perfsonar-testpoint:${{ steps.meta.outputs.version }} \
-            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
-            2>/dev/null || true)"
-          if [ -n "$LABEL_VERSION" ] && [ "$LABEL_VERSION" != "<no value>" ]; then
-            echo "Using upstream image label: $LABEL_VERSION"
-            echo "version=$LABEL_VERSION" > version_override.env
-          else
-            echo "version=${{ steps.meta.outputs.version }}" > version_override.env
-          fi
-
-      - name: Export final version
-        id: finalver
-        shell: bash
-        run: |
-          source version_override.env
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Ensure local base tags exist (meta and final)
+      - name: Select final version (respect forced override)
+        id: version_select
         shell: bash
         run: |
           set -euo pipefail
           META='${{ steps.meta.outputs.version }}'
-          FINAL='${{ steps.finalver.outputs.version }}'
-          docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null
-          if [ "${FINAL}" != "${META}" ]; then
-            docker tag "local/perfsonar-testpoint:${META}" "local/perfsonar-testpoint:${FINAL}"
+          UPSTREAM_REF='${{ github.event.inputs.upstream_ref }}'
+          FORCE='${{ github.event.inputs.force_version }}'
+          echo "Derived META version: $META"
+          echo "User upstream_ref: $UPSTREAM_REF"
+          echo "User force_version: $FORCE"
+
+          # If user forces a version, take it directly.
+          if [ -n "$FORCE" ]; then
+            echo "Using forced version: $FORCE"
+            echo "version=$FORCE" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Helper matchers
+          is_semver_like() {
+            echo "$1" | grep -Eq '^[v]?[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
+          }
+          is_perfsonar_label() {
+            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
+          }
+          is_distro_label() {
+            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+$'
+          }
+
+          CHOSEN="${META#v}"
+
+          # If upstream_ref looks like a perfSONAR tag, prefer it over META
+          if [ -n "$UPSTREAM_REF" ] && is_semver_like "$UPSTREAM_REF"; then
+            CHOSEN="${UPSTREAM_REF#v}"
+            echo "Using upstream_ref as base version: $CHOSEN"
+          fi
+
+          # Try OCI label from the locally built upstream image
+          RAW_LABEL="$(docker inspect local/perfsonar-testpoint:${META} \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
+          echo "Raw OCI label: '${RAW_LABEL}'"
+
+          if [ -n "$RAW_LABEL" ] && [ "$RAW_LABEL" != "<no value>" ]; then
+            if is_perfsonar_label "$RAW_LABEL"; then
+              CHOSEN="$RAW_LABEL"
+              echo "Using OCI label as final version: $CHOSEN"
+            elif is_distro_label "$RAW_LABEL"; then
+              echo "Ignoring OCI label '$RAW_LABEL' (distro-style version)"
+            else
+              echo "Ignoring OCI label '$RAW_LABEL' (unrecognized pattern)"
+            fi
+          fi
+
+          echo "Final chosen version: $CHOSEN"
+          echo "version=$CHOSEN" >> "$GITHUB_OUTPUT"
 
       - name: Verify required patch files exist
         shell: bash
@@ -182,7 +141,7 @@ jobs:
         run: |
           set -eux
           META='${{ steps.meta.outputs.version }}'
-          FINAL='${{ steps.finalver.outputs.version }}'
+          FINAL='${{ steps.version_select.outputs.version }}'
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
@@ -204,7 +163,7 @@ jobs:
 
       - name: Push version tag
         shell: bash
-        run: docker push "${REGISTRY}/${IMAGE_REPO}:${{ steps.finalver.outputs.version }}"
+        run: docker push "${REGISTRY}/${IMAGE_REPO}:${{ steps.version_select.outputs.version }}"
 
       - name: Push latest tag
         shell: bash
