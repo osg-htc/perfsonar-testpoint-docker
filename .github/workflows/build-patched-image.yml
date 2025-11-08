@@ -1,15 +1,14 @@
----
 name: Build and push patched perfSONAR Testpoint
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: Upstream ref (tag or branch). Blank uses default.
+        description: "Upstream ref (tag/branch). Blank = default."
         required: false
         default: ""
       env_tag:
-        description: Optional env tag: production/test/none
+        description: "Optional env tag: production/test/none"
         required: false
         default: "none"
   schedule:
@@ -24,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
@@ -35,14 +33,11 @@ jobs:
           set -eux
           REF="${{ github.event.inputs.upstream_ref }}"
           if [ -n "${REF}" ]; then
-            git clone --depth=1 \
-              --branch "${REF}" \
-              https://github.com/perfsonar/perfsonar-testpoint-docker \
-              upstream
+            git clone --depth=1 --branch "${REF}" \
+              https://github.com/perfsonar/perfsonar-testpoint-docker upstream
           else
             git clone --depth=1 \
-              https://github.com/perfsonar/perfsonar-testpoint-docker \
-              upstream
+              https://github.com/perfsonar/perfsonar-testpoint-docker upstream
           fi
 
       - name: Determine version from upstream
@@ -55,8 +50,7 @@ jobs:
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
           if [ -z "$VERSION" ]; then
-            VERSION="$(git -C upstream describe --tags --abbrev=0 \
-              2>/dev/null || true)"
+            VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null || true)"
           fi
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
@@ -66,15 +60,13 @@ jobs:
       - name: Log version
         shell: bash
         run: |
-          echo "Building upstream version: \
-          ${{ steps.meta.outputs.version }}"
+          echo "Building upstream version: ${{ steps.meta.outputs.version }}"
 
       - name: Build upstream image locally
         shell: bash
         run: |
-          docker build \
-            -t local/perfsonar-testpoint:${{ steps.meta.outputs.version }} \
-            ./upstream
+          VER='${{ steps.meta.outputs.version }}'
+          docker build -t local/perfsonar-testpoint:"$VER" ./upstream
 
       - name: Prefer upstream OCI version label if present
         id: readlabel
@@ -82,19 +74,14 @@ jobs:
         run: |
           set -euo pipefail
           LABEL_VERSION="$(
-            docker inspect \
-              local/perfsonar-testpoint:${{ steps.meta.outputs.version }} \
-              --format '{{ index .Config.Labels \
-                "org.opencontainers.image.version" }}' \
-            || true
+            docker inspect local/perfsonar-testpoint:${{ steps.meta.outputs.version }} \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true
           )"
-          if [ -n "$LABEL_VERSION" ] && \
-             [ "$LABEL_VERSION" != "<no value>" ]; then
+          if [ -n "$LABEL_VERSION" ] && [ "$LABEL_VERSION" != "<no value>" ]; then
             echo "Using upstream image label: $LABEL_VERSION"
             echo "version=$LABEL_VERSION" > version_override.env
           else
-            echo "version=${{ steps.meta.outputs.version }}" \
-              > version_override.env
+            echo "version=${{ steps.meta.outputs.version }}" > version_override.env
           fi
 
       - name: Export final version
@@ -111,15 +98,13 @@ jobs:
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && \
              [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
-            EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:\
-${{ github.event.inputs.env_tag }}"
+            EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
+          VER='${{ steps.finalver.outputs.version }}'
           docker build \
-            --build-arg BASE_IMAGE=local/perfsonar-testpoint:\
-${{ steps.finalver.outputs.version }} \
+            --build-arg BASE_IMAGE=local/perfsonar-testpoint:"$VER" \
             -f Dockerfile.patched \
-            -t ${REGISTRY}/${IMAGE_REPO}:\
-${{ steps.finalver.outputs.version }} \
+            -t ${REGISTRY}/${IMAGE_REPO}:"$VER" \
             -t ${REGISTRY}/${IMAGE_REPO}:latest \
             ${EXTRA_TAG} \
             .
@@ -134,9 +119,7 @@ ${{ steps.finalver.outputs.version }} \
       - name: Push version tag
         shell: bash
         run: |
-          docker push \
-            ${REGISTRY}/${IMAGE_REPO}:\
-${{ steps.finalver.outputs.version }}
+          docker push ${REGISTRY}/${IMAGE_REPO}:"${{ steps.finalver.outputs.version }}"
 
       - name: Push latest tag
         shell: bash
@@ -147,5 +130,4 @@ ${{ steps.finalver.outputs.version }}
         if: ${{ github.event.inputs.env_tag != '' && github.event.inputs.env_tag != 'none' }}
         shell: bash
         run: |
-          docker push ${REGISTRY}/${IMAGE_REPO}:\
-${{ github.event.inputs.env_tag }}
+          docker push ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}
