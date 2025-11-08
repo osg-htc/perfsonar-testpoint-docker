@@ -1,0 +1,41 @@
+name: Promote tag (production/test) without rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Existing tag to promote (e.g., a version or 'latest')"
+        required: true
+        default: "latest"
+      target_tag:
+        description: "Target tag to apply (production or test)"
+        required: true
+        type: choice
+        options:
+          - production
+          - test
+
+env:
+  REGISTRY: hub.opensciencegrid.org
+  IMAGE_REPO: osg-htc/perfsonar-testpoint
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.3
+
+      - name: Login to Harbor
+        run: |
+          crane auth login $REGISTRY -u "${{ secrets.HARBOR_USERNAME }}" -p "${{ secrets.HARBOR_PASSWORD }}"
+
+      - name: Copy tag by digest (no rebuild)
+        run: |
+          SRC="${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.source_tag }}"
+          DST="${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.target_tag }}"
+          # Copy preserves the manifest/digest server-side
+          crane copy "$SRC" "$DST"
+
+      - name: Verify promoted tag
+        run: crane digest ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.target_tag }}
