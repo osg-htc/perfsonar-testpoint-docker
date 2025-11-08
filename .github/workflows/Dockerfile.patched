@@ -1,0 +1,15 @@
+# This Dockerfile layers our Apache vhost patch on top of the upstream-built image.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Copy patch and apply to the default SSL vhost config
+COPY patches/default-ssl.conf.patch /tmp/default-ssl.conf.patch
+
+# Install 'patch' and ensure required Apache modules are enabled, then apply patch
+# Note: a2enmod is idempotent; this ensures proxy/proxy_http per your comment.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch apache2; \
+    patch /etc/apache2/sites-available/default-ssl.conf < /tmp/default-ssl.conf.patch; \
+    a2enmod proxy proxy_http; \
+    apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/default-ssl.conf.patch
