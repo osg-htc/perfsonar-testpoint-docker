@@ -1,0 +1,50 @@
+--- default-ssl.conf.start      2025-11-06 06:43:43.762238791 -0500
++++ default-ssl.conf    2025-11-06 07:25:26.614265105 -0500
+@@ -4,6 +4,47 @@
+
+                DocumentRoot /var/www/html
+
++# Restrict node_exporter to only be accessed via AGLT2 and CERN networks
++#    Assumes mod_proxy and mod_proxy_http are enabled ('sudo ae2nmod proxy proxy_http; sudo systemctl restart apache2')
++               <Location /metrics>
++                   ProxyPass http://localhost:9100/metrics
++                   ProxyPassReverse http://localhost:9100/metrics
++
++                   Order deny,allow
++                   Deny from all
++                   Allow from 2001:48a8:68f7::/50  # AGLT2 IPv6 block
++                   Allow from 192.41.230.0/23      # AGLT2 UM IPv4 block
++                   Allow from 192.41.236.0/23      # AGLT2 MSU IPv4 block
++                   Allow from 2001:1458:d00::/48   # CERN IPv6 block
++                   Allow from 2001:1458:d03::/48   # CERN IPv6 block
++                   Allow from 2001:1458:301::/48   # CERN IPv6 block
++                   Allow from 2001:1458:302::/48   # CERN IPv6 block
++                   Allow from 2001:1458:303::/48   # CERN IPv6 block
++                   Allow from 188.184.0.0/17       # CERN IPv4 block
++                   Allow from 188.185.0.0/17       # CERN IPv4 block
++                   Allow from 188.185.128.0/18     # CERN IPv4 block
++                   Allow from 128.142.0.0/16       # CERN IPv4 block
++                   # Add more Allow from directives for other subnets if needed
++               </Location>
++# Restrict perfsonar_exporter to only be accessed via AGLT2 and CERN networks
++               <Directory /var/www/html/perfsonar/host>
++                   Require all denied
++                    # Allow access only from specific networks
++                   Require ip 2001:48a8:68f7::/50  # AGLT2 IPv6 block
++                   Require ip 192.41.230.0/23      # AGLT2 UM IPv4 block
++                   Require ip 192.41.236.0/23      # AGLT2 MSU IPv4 block
++                   Require ip 2001:1458:d00::/48   # CERN IPv6 block
++                   Require ip 2001:1458:d03::/48   # CERN IPv6 block
++                   Require ip 2001:1458:301::/48   # CERN IPv6 block
++                   Require ip 2001:1458:302::/48   # CERN IPv6 block
++                   Require ip 2001:1458:303::/48   # CERN IPv6 block
++                   Require ip 188.184.0.0/17       # CERN IPv4 block
++                   Require ip 188.185.0.0/17       # CERN IPv4 block
++                   Require ip 188.185.128.0/18     # CERN IPv4 block
++                   Require ip 128.142.0.0/16       # CERN IPv4 block
++                   # Add more Require ip directives for other subnets if needed
++               </Directory>
++
+                # Available loglevels: trace8, ..., trace1, debug, info, notice, warn,
+                # error, crit, alert, emerg.
+                # It is also possible to configure the loglevel for particular
