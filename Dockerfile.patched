@@ -1,17 +1,33 @@
-# Dockerfile.patched
-# Layers the Apache vhost patch onto the upstream perfSONAR testpoint image
-# Built upstream image is tagged locally as: local/perfsonar-testpoint:<version>
-ARG BASE_IMAGE
+# Layers the Apache vhost changes onto the upstream-built image
+# Upstream image is built locally as local/perfsonar-testpoint:<version>
+ARG BASE_IMAGE=scratch
 FROM ${BASE_IMAGE}
 
-# Copy patch
+# Copy the unified diff (kept for when it applies cleanly) and a plain snippet for fallback
 COPY patches/default-ssl.conf.patch /tmp/default-ssl.conf.patch
+COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
-# Apply patch and ensure required Apache modules
-# (a2enmod proxy proxy_http is idempotent)
+# Apply changes and validate Apache config. Enable needed modules.
 RUN set -eux; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch apache2; \
-    patch /etc/apache2/sites-available/default-ssl.conf < /tmp/default-ssl.conf.patch; \
-    a2enmod proxy proxy_http; \
-    apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/default-ssl.conf.patch
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      apache2 patch; \
+    # Ensure modules required by your config are enabled
+    a2enmod proxy proxy_http access_compat; \
+    conf=/etc/apache2/sites-available/default-ssl.conf; \
+    # Try to apply unified diff with relaxed whitespace and high fuzz
+    if patch -l -f -F 3 "$conf" < /tmp/default-ssl.conf.patch; then \
+      echo "Unified diff applied successfully"; \
+    else \
+      echo "Unified diff failed; injecting OSG restrictions block after DocumentRoot"; \
+      awk 'NR==FNR{block=block $0 ORS; next} \
+           {print} \
+           /DocumentRoot[[:space:]]+\\/var\\/www\\/html/ && !done{print block; done=1}' \
+        /tmp/osg-restrictions.conf "$conf" > "$conf.new"; \
+      mv "$conf.new" "$conf"; \
+    fi; \
+    # Validate Apache configuration
+    apache2ctl -t; \
+    # Cleanup
+    rm -f /tmp/default-ssl.conf.patch /tmp/osg-restrictions.conf; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
