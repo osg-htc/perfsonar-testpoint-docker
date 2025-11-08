@@ -7,6 +7,10 @@ name: Build and push patched perfSONAR Testpoint
         description: "Upstream ref (tag or branch) to build from (blank = default branch)"
         required: false
         default: ""
+      force_version:
+        description: "Force final published version (override OCI label & VERSION)"
+        required: false
+        default: ""
       env_tag:
         description: "Optional environment tag to also apply (production/test/none)"
         required: false
@@ -27,6 +31,70 @@ jobs:
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
+
+      - name: Select final version (respect forced override)
+        id: version_select
+        shell: bash
+        run: |
+          set -euo pipefail
+          META='${{ steps.meta.outputs.version }}'
+          UPSTREAM_REF='${{ github.event.inputs.upstream_ref }}'
+          FORCE='${{ github.event.inputs.force_version }}'
+
+          echo "Derived META version: $META"
+          echo "User upstream_ref: $UPSTREAM_REF"
+          echo "User force_version: $FORCE"
+
+          # If user forces a version, take it directly.
+          if [ -n "$FORCE" ]; then
+            echo "Using forced version: $FORCE"
+            echo "version=$FORCE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # If upstream_ref is a tag and looks like a perfSONAR version pattern,
+          # prefer it unless META differs in a meaningful way.
+          is_semver_like() {
+            echo "$1" | grep -Eq '^[v]?[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
+          }
+
+          CHOSEN="$META"
+          if [ -n "$UPSTREAM_REF" ] && is_semver_like "$UPSTREAM_REF"; then
+            # Normalize leading v
+            N_REF="${UPSTREAM_REF#v}"
+            N_META="${META#v}"
+            if [ "$N_REF" != "$N_META" ]; then
+              echo "Overriding derived META version ($META) with upstream_ref tag ($UPSTREAM_REF)"
+              CHOSEN="$N_REF"
+            fi
+          fi
+
+          # Attempt OCI label only if it matches perfSONAR pattern and not a distro version.
+          RAW_LABEL="$(docker inspect local/perfsonar-testpoint:${META} \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
+
+          echo "Raw OCI label: '$RAW_LABEL'"
+
+          is_perfsonar_label() {
+            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
+          }
+          is_distro_label() {
+            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+$'
+          }
+
+          if [ -n "$RAW_LABEL" ] && [ "$RAW_LABEL" != "<no value>" ]; then
+            if is_perfsonar_label "$RAW_LABEL"; then
+              echo "Using OCI label as final version: $RAW_LABEL"
+              CHOSEN="$RAW_LABEL"
+            elif is_distro_label "$RAW_LABEL"; then
+              echo "Ignoring OCI label '$RAW_LABEL' (distro-style version)"
+            else
+              echo "Ignoring OCI label '$RAW_LABEL' (unrecognized pattern)"
+            fi
+          fi
+
+          echo "Final chosen version: $CHOSEN"
+          echo "version=$CHOSEN" >> "$GITHUB_OUTPUT"
 
       - name: Clone upstream source
         shell: bash
