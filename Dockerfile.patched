@@ -1,0 +1,17 @@
+# Dockerfile.patched
+# Layers the Apache vhost patch onto the upstream perfSONAR testpoint image
+# Built upstream image is tagged locally as: local/perfsonar-testpoint:<version>
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Copy patch
+COPY patches/default-ssl.conf.patch /tmp/default-ssl.conf.patch
+
+# Apply patch and ensure required Apache modules
+# (a2enmod proxy proxy_http is idempotent)
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch apache2; \
+    patch /etc/apache2/sites-available/default-ssl.conf < /tmp/default-ssl.conf.patch; \
+    a2enmod proxy proxy_http; \
+    apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/default-ssl.conf.patch
