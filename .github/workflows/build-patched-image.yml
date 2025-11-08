@@ -59,7 +59,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Log version
-        run: echo "Building upstream version: ${{ steps.meta.outputs.version }}"
+        run: |
+          echo "Building upstream version: ${{ steps.meta.outputs.version }}"
 
       - name: Build upstream image locally
         run: |
