@@ -1,4 +1,4 @@
-name: Build and push patched perfSONAR Testpoint
+name: Build and push patched perfSONAR Testpoint (minimal, single-arch)
 
 "on":
   workflow_dispatch:
@@ -6,26 +6,19 @@ name: Build and push patched perfSONAR Testpoint
       upstream_tag:
         description: "Upstream tag to build from (e.g. v5.2.3 or 5.2.3). Blank = default branch."
         required: false
-        default: ""
+        default: "v5.2.3"
       variant:
-        description: "Base variant (systemd|supervisord)"
+        description: "Base variant (systemd|supervisord). Minimal workflow builds single-arch only."
         required: false
         default: "systemd"
-      platform:
-        description: "Target architecture (amd64|arm64|both)"
-        required: false
-        default: "amd64"
       force_version:
         description: "Force final version tag (override auto logic)"
         required: false
         default: ""
       env_tag:
-        description: "Optional additional tag (e.g. production/test/none)"
+        description: "Optional extra tag to also publish (e.g. production, test, or none)"
         required: false
         default: "none"
-
-  schedule:
-    - cron: "23 6 * * *"
 
 env:
   REGISTRY: hub.opensciencegrid.org
@@ -44,7 +37,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Resolve upstream tag
+      - name: Resolve upstream tag (accepts plain or v-prefixed)
         id: resolve_tag
         shell: bash
         run: |
@@ -56,19 +49,18 @@ jobs:
             echo "resolved=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Direct match
           if git ls-remote --tags "$REPO" | grep -q "refs/tags/${INPUT}$"; then
             RES="$INPUT"
-          # Try v-prefix
-          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && git ls-remote --tags "$REPO" | grep -q "refs/tags/v${INPUT}$"; then
+          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && \
+               git ls-remote --tags "$REPO" | grep -q "refs/tags/v${INPUT}$"; then
             RES="v${INPUT}"
           else
             echo "ERROR: Upstream tag '${INPUT}' not found (exact or v-prefixed)." >&2
             git ls-remote --tags "$REPO" | awk -F/ '{print $NF}' | tail -n 20 >&2
             exit 1
           fi
-          echo "Resolved upstream tag: $RES"
           echo "resolved=$RES" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream tag: $RES"
 
       - name: Clone upstream source
         shell: bash
@@ -84,10 +76,9 @@ jobs:
             git -C upstream fetch --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
             git -C upstream checkout -q "tags/$TAG"
           fi
-          echo "HEAD commit:"
           git -C upstream rev-parse --short HEAD
 
-      - name: Determine meta version
+      - name: Determine meta version (for tagging)
         id: meta
         shell: bash
         run: |
@@ -104,8 +95,8 @@ jobs:
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
           fi
-          echo "META version: $VERSION"
           echo "meta=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "META version: $VERSION"
 
       - name: Select final published version
         id: final
@@ -123,130 +114,67 @@ jobs:
             echo "ERROR: Version '$FINAL' looks like a distro release; override with force_version." >&2
             exit 1
           fi
-          echo "Final version tag: $FINAL"
           echo "version=$FINAL" >> "$GITHUB_OUTPUT"
+          echo "Final version: $FINAL"
 
       - name: Show parameters
         shell: bash
         run: |
-          echo "Resolved upstream tag: '${{ steps.resolve_tag.outputs.resolved }}'"
-          echo "META version: '${{ steps.meta.outputs.meta }}'"
-          echo "Final version: '${{ steps.final.outputs.version }}'"
-          echo "Variant: '${{ github.event.inputs.variant }}'"
-          echo "Platform: '${{ github.event.inputs.platform }}'"
+          echo "Upstream tag:        '${{ steps.resolve_tag.outputs.resolved }}'"
+          echo "META version:        '${{ steps.meta.outputs.meta }}'"
+          echo "Final version:       '${{ steps.final.outputs.version }}'"
+          echo "Variant:             '${{ github.event.inputs.variant }}'"
 
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build upstream base image(s)
-        id: upstream_build
+      - name: Build upstream base image (single-arch, classic docker)
         shell: bash
         run: |
           set -eux
           VARIANT='${{ github.event.inputs.variant }}'
           META='${{ steps.meta.outputs.meta }}'
           DOCKERFILE="Dockerfile"
-          [ "$VARIANT" = "systemd" ] && DOCKERFILE="systemd/Dockerfile"
-          CACHE_SCOPE="osg-upstream-${VARIANT}"
+          case "$VARIANT" in
+            systemd) DOCKERFILE="systemd/Dockerfile" ;;
+            supervisord) DOCKERFILE="Dockerfile" ;;
+            *) echo "Invalid variant '$VARIANT' (must be systemd or supervisord)"; exit 1 ;;
+          esac
+          docker build \
+            -f "upstream/${DOCKERFILE}" \
+            -t "local/perfsonar-testpoint:${META}" \
+            upstream
 
-          if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
-            for PLAT in linux/amd64 linux/arm64; do
-              ARCH=$(echo "$PLAT" | cut -d/ -f2)
-              docker buildx build \
-                --platform "$PLAT" \
-                --cache-from type=gha,scope=${CACHE_SCOPE} \
-                --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
-                --load \
-                -f "upstream/${DOCKERFILE}" \
-                -t "local/perfsonar-testpoint:${META}-${ARCH}" \
-                upstream
-            done
-          else
-            case '${{ github.event.inputs.platform }}' in
-              arm64) PLAT=linux/arm64 ;;
-              amd64|*) PLAT=linux/amd64 ;;
-            esac
-            docker buildx build \
-              --platform "$PLAT" \
-              --cache-from type=gha,scope=${CACHE_SCOPE} \
-              --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
-              --load \
-              -f "upstream/${DOCKERFILE}" \
-              -t "local/perfsonar-testpoint:${META}" \
-              upstream
-          fi
-
-      - name: Verify upstream image(s) exist
+      - name: Verify upstream image exists locally
         shell: bash
         run: |
           set -euo pipefail
           META='${{ steps.meta.outputs.meta }}'
-          if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
-            docker image inspect "local/perfsonar-testpoint:${META}-amd64" >/dev/null || { echo "Missing amd64 upstream image"; exit 1; }
-            docker image inspect "local/perfsonar-testpoint:${META}-arm64" >/dev/null || { echo "Missing arm64 upstream image"; exit 1; }
-          else
-            docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null || { echo "Missing single-arch upstream image"; exit 1; }
-          fi
-          echo "Listing local perfsonar images:"
+          docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null
+          echo "Local images:"
           docker images --format '{{.Repository}}:{{.Tag}}' | grep '^local/perfsonar-testpoint' || true
 
-      - name: Verify patch artifacts
+      - name: Verify patch artifacts exist
         shell: bash
         run: |
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
           [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
 
-      - name: Build patched image (single arch) with cache
-        if: ${{ github.event.inputs.platform != 'both' }}
+      - name: Build patched image (single-arch, classic docker)
         shell: bash
         run: |
           set -eux
-          VARIANT='${{ github.event.inputs.variant }}'
           META='${{ steps.meta.outputs.meta }}'
           FINAL='${{ steps.final.outputs.version }}'
-          CACHE_SCOPE="osg-patch-${VARIANT}"
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
-          docker buildx build \
+          docker build \
             --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}" \
             --build-arg PATCH_REV="${{ github.run_number }}" \
-            --cache-from type=gha,scope=${CACHE_SCOPE} \
-            --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
             -f Dockerfile.patched \
             -t "${REGISTRY}/${IMAGE_REPO}:${FINAL}" \
             -t "${REGISTRY}/${IMAGE_REPO}:latest" \
             ${EXTRA_TAG} \
-            --load \
             .
-
-      - name: Build & push patched image (multi-arch) with cache
-        if: ${{ github.event.inputs.platform == 'both' }}
-        shell: bash
-        run: |
-          set -eux
-          VARIANT='${{ github.event.inputs.variant }}'
-          META='${{ steps.meta.outputs.meta }}'
-          FINAL='${{ steps.final.outputs.version }}'
-          CACHE_SCOPE="osg-patch-${VARIANT}"
-          EXTRA_TAGS=""
-          if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
-            EXTRA_TAGS="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
-          fi
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}-amd64" \
-            --build-arg PATCH_REV="${{ github.run_number }}" \
-            --cache-from type=gha,scope=${CACHE_SCOPE} \
-            --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
-            -f Dockerfile.patched \
-            -t "${REGISTRY}/${IMAGE_REPO}:${FINAL}" \
-            -t "${REGISTRY}/${IMAGE_REPO}:latest" \
-            ${EXTRA_TAGS} \
-            --push \
-            .
-          echo "NOTE: Multi-arch patch still derives from amd64 base only."
 
       - name: Login to Harbor
         uses: docker/login-action@v3
@@ -255,8 +183,7 @@ jobs:
           username: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
           password: ${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}
 
-      - name: Push single-arch tags
-        if: ${{ github.event.inputs.platform != 'both' }}
+      - name: Push patched images
         shell: bash
         run: |
           set -eux
@@ -270,8 +197,5 @@ jobs:
       - name: Summary
         shell: bash
         run: |
-          echo "Upstream tag: '${{ steps.resolve_tag.outputs.resolved }}'"
-          echo "META version: '${{ steps.meta.outputs.meta }}'"
-          echo "Final published version: '${{ steps.final.outputs.version }}'"
-          echo "Variant: '${{ github.event.inputs.variant }}'"
-          echo "Platform: '${{ github.event.inputs.platform }}'"
+          echo "Upstream tag:   '${{ steps.resolve_tag.outputs.resolved }}'"
+          echo "Published tags: '${{ steps.final.outputs.version }}', 'latest'${{ github.event.inputs.env_tag != '' && github.event.inputs.env_tag != 'none' && format(', {0}', github.event.inputs.env_tag) || '' }}"
