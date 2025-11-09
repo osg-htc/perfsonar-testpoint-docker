@@ -1,5 +1,4 @@
 # Build a small patch layer on top of the upstream image.
-# BASE_IMAGE must be provided as a build-arg (e.g., local/perfsonar-testpoint:<tag> or ghcr.io/...@sha256:...).
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
@@ -24,23 +23,38 @@ RUN set -eux; \
         fi; \
     fi; \
     \
-    # Disable HTTP on port 80 by commenting any 'Listen 80' style lines in ports.conf (idempotent)
-    PORTS=/etc/apache2/ports.conf; \
-    if [ -f "$PORTS" ]; then \
-      if grep -Eq '^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)' "$PORTS"; then \
-        sed -ri 's/^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)/#&/' "$PORTS"; \
-      fi; \
+    # BEFORE change: show current ports.conf
+    echo '--- Original ports.conf ---'; \
+    cat /etc/apache2/ports.conf || true; \
+    \
+    # Disable HTTP on port 80: remove all Listen 80 style lines (including host:80 forms)
+    TMP_PORTS=/etc/apache2/ports.conf.new; \
+    awk '!/^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)/' /etc/apache2/ports.conf > "$TMP_PORTS"; \
+    mv "$TMP_PORTS" /etc/apache2/ports.conf; \
+    \
+    # AFTER change: show modified ports.conf
+    echo '--- Modified ports.conf ---'; \
+    cat /etc/apache2/ports.conf; \
+    \
+    # Add a global ServerName to suppress warning
+    if ! grep -q '^ServerName ' /etc/apache2/apache2.conf; then \
+        echo 'ServerName localhost' >> /etc/apache2/apache2.conf; \
     fi; \
     \
-    # Disable default HTTP site on port 80 (idempotent)
+    # Disable default HTTP site (idempotent) and remove source & enabled copies
     a2dissite 000-default >/dev/null 2>&1 || true; \
     rm -f /etc/apache2/sites-enabled/000-default.conf || true; \
+    rm -f /etc/apache2/sites-available/000-default.conf || true; \
     \
-    # Ensure the SSL site is enabled (usually already, but idempotent)
+    # Ensure SSL site is enabled
     a2ensite default-ssl >/dev/null 2>&1 || true; \
     \
-    # Validate Apache configuration
+    # Validate Apache configuration (will fail if syntax bad)
     apache2ctl -t; \
+    \
+    # Show effective listening directives (for verification)
+    echo '--- post-validation grep for Listen ---'; \
+    grep -R "^[[:space:]]*Listen" /etc/apache2 || true; \
     \
     # Cleanup
     rm -f /tmp/osg-restrictions.conf; \
