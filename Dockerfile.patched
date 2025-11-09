@@ -1,27 +1,47 @@
-# Layers Apache 2.4 restrictions onto locally built upstream image.
-# You MUST pass --build-arg BASE_IMAGE=local/perfsonar-testpoint:<version>
+# Build a small patch layer on top of the upstream image.
+# BASE_IMAGE must be provided as a build-arg (e.g., local/perfsonar-testpoint:<tag> or ghcr.io/...@sha256:...).
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+# Copy snippet with pure Apache 2.4 restrictions
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2; \
     a2enmod proxy proxy_http; \
+    \
+    # Inject OSG restrictions into the SSL vhost (idempotent)
     CONF=/etc/apache2/sites-available/default-ssl.conf; \
     if grep -q 'BEGIN OSG restrictions' "$CONF"; then \
         echo "Restrictions already present; skipping injection"; \
     else \
-        # Find the first DocumentRoot line; insert after it. If not found, append.
         DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
         if [ -n "$DR_LINE" ]; then \
-            # sed: read (-r) the snippet after the matched line number
             sed -i "${DR_LINE}r /tmp/osg-restrictions.conf" "$CONF"; \
         else \
             cat /tmp/osg-restrictions.conf >> "$CONF"; \
         fi; \
     fi; \
+    \
+    # Disable HTTP on port 80 by commenting any 'Listen 80' style lines in ports.conf (idempotent)
+    PORTS=/etc/apache2/ports.conf; \
+    if [ -f "$PORTS" ]; then \
+      if grep -Eq '^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)' "$PORTS"; then \
+        sed -ri 's/^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)/#&/' "$PORTS"; \
+      fi; \
+    fi; \
+    \
+    # Disable default HTTP site on port 80 (idempotent)
+    a2dissite 000-default >/dev/null 2>&1 || true; \
+    rm -f /etc/apache2/sites-enabled/000-default.conf || true; \
+    \
+    # Ensure the SSL site is enabled (usually already, but idempotent)
+    a2ensite default-ssl >/dev/null 2>&1 || true; \
+    \
+    # Validate Apache configuration
     apache2ctl -t; \
+    \
+    # Cleanup
     rm -f /tmp/osg-restrictions.conf; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
