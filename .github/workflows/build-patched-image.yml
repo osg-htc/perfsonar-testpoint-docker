@@ -74,7 +74,7 @@ jobs:
         run: |
           set -eux
           REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
-            REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
+          REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
           if [ -z "$REF" ]; then
             git clone --depth=1 "$REPO" upstream
           else
@@ -183,7 +183,7 @@ jobs:
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
           [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
 
-      # CACHE-ENABLED PATCH (single-arch)
+      # CACHE-ENABLED PATCH (single-arch) — use docker-image:// to consume local base from daemon
       - name: Build patched image (single arch) with cache
         if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
@@ -198,7 +198,7 @@ jobs:
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
           docker buildx build \
-            --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}" \
+            --build-arg BASE_IMAGE="docker-image://local/perfsonar-testpoint:${META}" \
             --build-arg PATCH_REV="${{ github.run_number }}" \
             --cache-from type=gha,scope=${CACHE_SCOPE} \
             --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
@@ -209,7 +209,7 @@ jobs:
             --load \
             .
 
-      # CACHE-ENABLED PATCH (multi-arch) — still using only amd64 upstream base for now
+      # CACHE-ENABLED PATCH (multi-arch) — still using only the amd64 base
       - name: Build & push patched image (multi-arch) with cache
         if: ${{ github.event.inputs.platform == 'both' }}
         shell: bash
@@ -225,7 +225,7 @@ jobs:
           fi
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}-amd64" \
+            --build-arg BASE_IMAGE="docker-image://local/perfsonar-testpoint:${META}-amd64" \
             --build-arg PATCH_REV="${{ github.run_number }}" \
             --cache-from type=gha,scope=${CACHE_SCOPE} \
             --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
