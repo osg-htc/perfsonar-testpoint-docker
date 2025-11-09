@@ -2,7 +2,7 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Re-declare ARGs you want to use in this stage
+# Make sure PATCH_REV is in scope in this stage
 ARG PATCH_REV=1
 ENV PATCH_REV=${PATCH_REV}
 
@@ -14,14 +14,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     set -eux; \
     echo "Patch revision: ${PATCH_REV}"; \
-    # Ensure apache2 exists
     if ! command -v apache2ctl >/dev/null 2>&1; then \
       apt-get update; \
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2; \
     fi; \
     a2enmod proxy proxy_http || true; \
-    \
-    # Inject restrictions if not present
     CONF=/etc/apache2/sites-available/default-ssl.conf; \
     if ! grep -q 'BEGIN OSG restrictions' "$CONF"; then \
       DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
@@ -31,11 +28,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         cat /tmp/osg-restrictions.conf >> "$CONF"; \
       fi; \
     fi; \
-    \
     echo '--- BEFORE ports.conf ---'; \
     cat /etc/apache2/ports.conf || true; \
-    \
-    # Hard rewrite ports.conf to remove any HTTP listeners
     { \
       echo '# Patched to disable plain HTTP (port 80)'; \
       echo '<IfModule ssl_module>'; \
@@ -46,30 +40,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       echo '</IfModule>'; \
     } > /etc/apache2/ports.conf.tmp; \
     mv /etc/apache2/ports.conf.tmp /etc/apache2/ports.conf; \
-    \
     echo '--- AFTER ports.conf ---'; \
     cat /etc/apache2/ports.conf; \
-    \
-    # Remove any lingering 'Listen 80' anywhere (fail if found)
     if grep -R --line-number 'Listen 80' /etc/apache2 2>/dev/null; then \
       echo 'ERROR: Residual Listen 80 found after rewrite' >&2; \
       exit 1; \
     fi; \
-    \
-    # Disable & remove default HTTP site
     a2dissite 000-default >/dev/null 2>&1 || true; \
     rm -f /etc/apache2/sites-enabled/000-default.conf || true; \
     rm -f /etc/apache2/sites-available/000-default.conf || true; \
-    \
-    # Ensure SSL site enabled
     a2ensite default-ssl >/dev/null 2>&1 || true; \
-    \
-    # Suppress ServerName warning
     grep -q '^ServerName ' /etc/apache2/apache2.conf || echo 'ServerName localhost' >> /etc/apache2/apache2.conf; \
-    \
-    # Validate config
     apache2ctl -t; \
     echo '--- ACTIVE LISTENERS (grep) ---'; \
     grep -R "^[[:space:]]*Listen" /etc/apache2 || true; \
-    \
     rm -f /tmp/osg-restrictions.conf
