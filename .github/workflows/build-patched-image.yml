@@ -3,18 +3,27 @@ name: Build and push patched perfSONAR Testpoint
 "on":
   workflow_dispatch:
     inputs:
-      upstream_ref:
-        description: "Upstream ref (tag or branch) to build from (blank = default branch)"
+      upstream_tag:
+        description: "Upstream tag to build from (e.g. v5.2.3 or 5.2.3). Blank = default branch."
         required: false
         default: ""
+      variant:
+        description: "Base variant (systemd|supervisord)"
+        required: false
+        default: "systemd"
+      platform:
+        description: "Target architecture (amd64|arm64|both)"
+        required: false
+        default: "amd64"
       force_version:
-        description: "Force final published version (override OCI label & VERSION)"
+        description: "Force final version tag (override auto logic)"
         required: false
         default: ""
       env_tag:
-        description: "Optional environment tag to also apply (production/test/none)"
+        description: "Optional additional tag (e.g. production/test/none)"
         required: false
         default: "none"
+
   schedule:
     - cron: "23 6 * * *"
 
@@ -22,125 +31,160 @@ env:
   REGISTRY: hub.opensciencegrid.org
   IMAGE_REPO: osg-htc/perfsonar-testpoint
 
+concurrency:
+  group: patched-perfsonar-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
+
+      - name: Resolve and validate upstream tag
+        id: tag_resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
+          REQ='${{ github.event.inputs.upstream_tag }}'
+          if [ -z "$REQ" ]; then
+            echo "No upstream_tag specified; will clone default branch."
+            echo "resolved_ref=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # If user included v, test directly; else try v-prefixed first
+            if git ls-remote --tags "$REPO" | grep -q "refs/tags/${REQ}$"; then
+            RES="$REQ"
+          elif [[ "$REQ" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && \
+               git ls-remote --tags "$REPO" | grep -q "refs/tags/v${REQ}$"; then
+            RES="v${REQ}"
+          else
+            echo "ERROR: Could not find upstream tag matching '$REQ' (tried exact and v-prefixed)" >&2
+            git ls-remote --tags "$REPO" | awk -F/ '{print $NF}' | tail -n 15 >&2
+            exit 1
+          fi
+          echo "Resolved upstream tag: $RES"
+          echo "resolved_ref=$RES" >> "$GITHUB_OUTPUT"
 
       - name: Clone upstream source
         shell: bash
         run: |
           set -eux
-          REF="${{ github.event.inputs.upstream_ref }}"
-          if [ -n "${REF}" ]; then
-            git clone --depth=1 --branch "${REF}" \
-              https://github.com/perfsonar/perfsonar-testpoint-docker upstream
+          REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
+          REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
+          if [ -z "$REF" ]; then
+            git clone --depth=1 "$REPO" upstream
           else
-            git clone --depth=1 \
-              https://github.com/perfsonar/perfsonar-testpoint-docker upstream
+            # Fetch only the tag commit (keeps history small but enough to build)
+            git init upstream
+            git -C upstream remote add origin "$REPO"
+            git -C upstream fetch --depth=1 origin "refs/tags/$REF:refs/tags/$REF"
+            git -C upstream checkout -q "tags/$REF"
           fi
+          echo "Checked out upstream revision:"
+          git -C upstream rev-parse --short HEAD
 
-      - name: Determine version from upstream
+      - name: Determine meta version
         id: meta
         shell: bash
         run: |
           set -euo pipefail
+          TAG='${{ steps.tag_resolve.outputs.resolved_ref }}'
           VERSION=""
-          if [ -f upstream/VERSION ]; then
+          # Prefer the resolved tag (normalized) if present
+          if [ -n "$TAG" ]; then
+            VERSION="${TAG#v}"
+          fi
+          # If no tag (default branch case), try upstream/VERSION
+          if [ -z "$VERSION" ] && [ -f upstream/VERSION ]; then
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
+          # Otherwise attempt describe (if shallow tagless clone – will usually fail silently)
           if [ -z "$VERSION" ]; then
-            VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null || true)"
+            VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
           fi
+          # Fallback to date
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "meta_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Meta version chosen: $VERSION"
 
-      - name: Log version
-        shell: bash
-        run: |
-          echo "Building upstream version: ${{ steps.meta.outputs.version }}"
-
-      - name: Build upstream image locally
-        shell: bash
-        run: |
-          META='${{ steps.meta.outputs.version }}'
-          docker build -t "local/perfsonar-testpoint:${META}" ./upstream
-
-      - name: Select final version (respect forced override)
+      - name: Select final version
         id: version_select
         shell: bash
         run: |
           set -euo pipefail
-          META='${{ steps.meta.outputs.version }}'
-          UPSTREAM_REF='${{ github.event.inputs.upstream_ref }}'
           FORCE='${{ github.event.inputs.force_version }}'
-          echo "Derived META version: $META"
-          echo "User upstream_ref: $UPSTREAM_REF"
-          echo "User force_version: $FORCE"
-
-          # If user forces a version, take it directly.
+          META='${{ steps.meta.outputs.meta_version }}'
           if [ -n "$FORCE" ]; then
-            echo "Using forced version: $FORCE"
-            echo "version=$FORCE" >> "$GITHUB_OUTPUT"
-            exit 0
+            FINAL="$FORCE"
+            echo "Using forced version: $FINAL"
+          else
+            FINAL="$META"
           fi
-
-          # Helper matchers
-          is_semver_like() {
-            echo "$1" | grep -Eq '^[v]?[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
-          }
-          is_perfsonar_label() {
-            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$'
-          }
-          is_distro_label() {
-            echo "$1" | grep -Eq '^[0-9]+\.[0-9]+$'
-          }
-
-          CHOSEN="${META#v}"
-
-          # If upstream_ref looks like a perfSONAR tag, prefer it over META
-          if [ -n "$UPSTREAM_REF" ] && is_semver_like "$UPSTREAM_REF"; then
-            CHOSEN="${UPSTREAM_REF#v}"
-            echo "Using upstream_ref as base version: $CHOSEN"
+          # Guard: discourage distro-like two-field versions unless forced
+          if [ -z "$FORCE" ] && echo "$FINAL" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+            echo "ERROR: Computed version '$FINAL' looks like a distro release; use force_version to override." >&2
+            exit 1
           fi
+          echo "version=$FINAL" >> "$GITHUB_OUTPUT"
 
-          # Try OCI label from the locally built upstream image
-          RAW_LABEL="$(docker inspect local/perfsonar-testpoint:${META} \
-            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
-          echo "Raw OCI label: '${RAW_LABEL}'"
-
-          if [ -n "$RAW_LABEL" ] && [ "$RAW_LABEL" != "<no value>" ]; then
-            if is_perfsonar_label "$RAW_LABEL"; then
-              CHOSEN="$RAW_LABEL"
-              echo "Using OCI label as final version: $CHOSEN"
-            elif is_distro_label "$RAW_LABEL"; then
-              echo "Ignoring OCI label '$RAW_LABEL' (distro-style version)"
-            else
-              echo "Ignoring OCI label '$RAW_LABEL' (unrecognized pattern)"
-            fi
-          fi
-
-          echo "Final chosen version: $CHOSEN"
-          echo "version=$CHOSEN" >> "$GITHUB_OUTPUT"
-
-      - name: Verify required patch files exist
+      - name: Show chosen parameters
         shell: bash
         run: |
-          [ -f Dockerfile.patched ] || { echo "Dockerfile.patched missing"; exit 1; }
-          [ -f patches/osg-restrictions.conf ] || { echo "patches/osg-restrictions.conf missing"; exit 1; }
+          echo "Upstream tag (resolved): '${{ steps.tag_resolve.outputs.resolved_ref }}'"
+          echo "Variant: '${{ github.event.inputs.variant }}'"
+          echo "Platform: '${{ github.event.inputs.platform }}'"
+          echo "Final version: '${{ steps.version_select.outputs.version }}'"
 
-      - name: Build patched image
+      - name: Set up buildx (multi-arch only)
+        if: ${{ github.event.inputs.platform == 'both' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build upstream base image (single-arch or per-arch base)
         shell: bash
         run: |
           set -eux
-          META='${{ steps.meta.outputs.version }}'
+          VARIANT='${{ github.event.inputs.variant }}'
+          META='${{ steps.meta.outputs.meta_version }}'
+          DOCKERFILE_PATH="Dockerfile"
+          if [ "$VARIANT" = "systemd" ]; then
+            DOCKERFILE_PATH="systemd/Dockerfile"
+          fi
+          if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
+            # Build two single-arch images so we have deterministic local names to reference (optional).
+            for PLAT in linux/amd64 linux/arm64; do
+              ARCH_TAG=$(echo "$PLAT" | cut -d/ -f2)
+              docker buildx build \
+                --platform "$PLAT" \
+                --load \
+                -f "upstream/${DOCKERFILE_PATH}" \
+                -t "local/perfsonar-testpoint:${META}-${ARCH_TAG}" \
+                upstream
+            done
+          else
+            # Single-arch simple docker build
+            docker build -f "upstream/${DOCKERFILE_PATH}" \
+              -t "local/perfsonar-testpoint:${META}" upstream
+          fi
+
+      - name: Prepare patched build context verification
+        shell: bash
+        run: |
+          [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
+          [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
+
+      - name: Build patched image (single arch)
+        if: ${{ github.event.inputs.platform != 'both' }}
+        shell: bash
+        run: |
+          set -eux
+          META='${{ steps.meta.outputs.meta_version }}'
           FINAL='${{ steps.version_select.outputs.version }}'
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
@@ -154,6 +198,30 @@ jobs:
             ${EXTRA_TAG} \
             .
 
+      - name: Build & push patched image (multi-arch)
+        if: ${{ github.event.inputs.platform == 'both' }}
+        shell: bash
+        run: |
+          set -eux
+          META='${{ steps.meta.outputs.meta_version }}'
+          FINAL='${{ steps.version_select.outputs.version }}'
+          EXTRA_TAGS=""
+          if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
+            EXTRA_TAGS="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
+          fi
+          # For multi-arch we rebuild once referencing upstream Dockerfile directly rather than the two local images.
+          # Optionally you could use --platform and one Dockerfile.patched referencing upstream tag directly (pull) instead of local builds.
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}-amd64" \
+            -f Dockerfile.patched \
+            -t "${REGISTRY}/${IMAGE_REPO}:${FINAL}" \
+            -t "${REGISTRY}/${IMAGE_REPO}:latest" \
+            ${EXTRA_TAGS} \
+            --push \
+            .
+          echo "NOTE: The multi-arch step above currently reuses only the amd64 local base. You may adapt Dockerfile.patched to pull variant-specific upstream images per arch if needed."
+
       - name: Login to Harbor
         uses: docker/login-action@v3
         with:
@@ -161,15 +229,21 @@ jobs:
           username: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
           password: ${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}
 
-      - name: Push version tag
+      - name: Push single-arch images
+        if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
-        run: docker push "${REGISTRY}/${IMAGE_REPO}:${{ steps.version_select.outputs.version }}"
+        run: |
+          set -eux
+          FINAL='${{ steps.version_select.outputs.version }}'
+          docker push "${REGISTRY}/${IMAGE_REPO}:${FINAL}"
+          docker push "${REGISTRY}/${IMAGE_REPO}:latest"
+          if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
+            docker push "${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
+          fi
 
-      - name: Push latest tag
+      - name: Summary
         shell: bash
-        run: docker push "${REGISTRY}/${IMAGE_REPO}:latest"
-
-      - name: Push env tag (production/test) if requested
-        if: ${{ github.event.inputs.env_tag != '' && github.event.inputs.env_tag != 'none' }}
-        shell: bash
-        run: docker push "${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
+        run: |
+          echo "Final published version: ${{ steps.version_select.outputs.version }}"
+          echo "Variant: ${{ github.event.inputs.variant }}"
+          echo "Platform mode: ${{ github.event.inputs.platform }}"
