@@ -56,7 +56,6 @@ jobs:
             echo "resolved_ref=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # If user included v, test directly; else try v-prefixed first
           if git ls-remote --tags "$REPO" | grep -q "refs/tags/${REQ}$"; then
             RES="$REQ"
           elif [[ "$REQ" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && \
@@ -75,11 +74,10 @@ jobs:
         run: |
           set -eux
           REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
-          REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
+            REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
           if [ -z "$REF" ]; then
             git clone --depth=1 "$REPO" upstream
           else
-            # Fetch only the tag commit (keeps history small but enough to build)
             git init upstream
             git -C upstream remote add origin "$REPO"
             git -C upstream fetch --depth=1 origin "refs/tags/$REF:refs/tags/$REF"
@@ -95,19 +93,15 @@ jobs:
           set -euo pipefail
           TAG='${{ steps.tag_resolve.outputs.resolved_ref }}'
           VERSION=""
-          # Prefer the resolved tag (normalized) if present
           if [ -n "$TAG" ]; then
             VERSION="${TAG#v}"
           fi
-          # If no tag (default branch case), try upstream/VERSION
           if [ -z "$VERSION" ] && [ -f upstream/VERSION ]; then
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
-          # Otherwise attempt describe (if shallow tagless clone – will usually fail silently)
           if [ -z "$VERSION" ]; then
             VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
           fi
-          # Fallback to date
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
           fi
@@ -127,7 +121,6 @@ jobs:
           else
             FINAL="$META"
           fi
-          # Guard: discourage distro-like two-field versions unless forced
           if [ -z "$FORCE" ] && echo "$FINAL" | grep -Eq '^[0-9]+\.[0-9]+$'; then
             echo "ERROR: Computed version '$FINAL' looks like a distro release; use force_version to override." >&2
             exit 1
@@ -142,7 +135,6 @@ jobs:
           echo "Platform: '${{ github.event.inputs.platform }}'"
           echo "Final version: '${{ steps.version_select.outputs.version }}'"
 
-      # NEW: Always set up Buildx so we can use cache for upstream rebuilds too
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -156,12 +148,9 @@ jobs:
           if [ "$VARIANT" = "systemd" ]; then
             DOCKERFILE_PATH="systemd/Dockerfile"
           fi
-
-          # Use a stable cache scope per variant so upstream rebuilds reuse layers
           CACHE_SCOPE="osg-upstream-${VARIANT}"
 
           if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
-            # Build two single-arch images (amd64 and arm64) and load them locally
             for PLAT in linux/amd64 linux/arm64; do
               ARCH_TAG=$(echo "$PLAT" | cut -d/ -f2)
               docker buildx build \
@@ -174,12 +163,10 @@ jobs:
                 upstream
             done
           else
-            # Map input platform to a Docker platform string
             case '${{ github.event.inputs.platform }}' in
               arm64) PLAT=linux/arm64 ;;
               amd64|*) PLAT=linux/amd64 ;;
             esac
-            # Single-arch upstream build with cache and --load
             docker buildx build \
               --platform "$PLAT" \
               --cache-from type=gha,scope=${CACHE_SCOPE} \
@@ -196,47 +183,59 @@ jobs:
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
           [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
 
-      - name: Build patched image (single arch)
+      # CACHE-ENABLED PATCH (single-arch)
+      - name: Build patched image (single arch) with cache
         if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
         run: |
           set -eux
+          VARIANT='${{ github.event.inputs.variant }}'
           META='${{ steps.meta.outputs.meta_version }}'
           FINAL='${{ steps.version_select.outputs.version }}'
+          CACHE_SCOPE="osg-patch-${VARIANT}"
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
-          docker build \
+          docker buildx build \
             --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}" \
+            --build-arg PATCH_REV="${{ github.run_number }}" \
+            --cache-from type=gha,scope=${CACHE_SCOPE} \
+            --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
             -f Dockerfile.patched \
             -t "${REGISTRY}/${IMAGE_REPO}:${FINAL}" \
             -t "${REGISTRY}/${IMAGE_REPO}:latest" \
             ${EXTRA_TAG} \
+            --load \
             .
 
-      - name: Build & push patched image (multi-arch)
+      # CACHE-ENABLED PATCH (multi-arch) — still using only amd64 upstream base for now
+      - name: Build & push patched image (multi-arch) with cache
         if: ${{ github.event.inputs.platform == 'both' }}
         shell: bash
         run: |
           set -eux
+          VARIANT='${{ github.event.inputs.variant }}'
           META='${{ steps.meta.outputs.meta_version }}'
           FINAL='${{ steps.version_select.outputs.version }}'
+          CACHE_SCOPE="osg-patch-${VARIANT}"
           EXTRA_TAGS=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
             EXTRA_TAGS="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
-          # For multi-arch we rebuild once referencing an amd64 local base.
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}-amd64" \
+            --build-arg PATCH_REV="${{ github.run_number }}" \
+            --cache-from type=gha,scope=${CACHE_SCOPE} \
+            --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
             -f Dockerfile.patched \
             -t "${REGISTRY}/${IMAGE_REPO}:${FINAL}" \
             -t "${REGISTRY}/${IMAGE_REPO}:latest" \
             ${EXTRA_TAGS} \
             --push \
             .
-          echo "NOTE: The multi-arch step above currently reuses only the amd64 local base. You may adapt Dockerfile.patched to pull variant-specific upstream images per arch if needed."
+          echo "NOTE: Multi-arch patch currently derives from amd64 only. For true per-arch upstream bases, build each arch separately and assemble a manifest."
 
       - name: Login to Harbor
         uses: docker/login-action@v3
@@ -263,3 +262,4 @@ jobs:
           echo "Final published version: ${{ steps.version_select.outputs.version }}"
           echo "Variant: ${{ github.event.inputs.variant }}"
           echo "Platform mode: ${{ github.event.inputs.platform }}"
+          echo "Upstream tag: ${{ steps.tag_resolve.outputs.resolved_ref }}"
