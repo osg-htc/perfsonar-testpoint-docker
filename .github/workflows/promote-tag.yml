@@ -63,7 +63,6 @@ jobs:
         run: |
           set -eo pipefail
 
-          # Normalize additional tags (split on comma/space/newline)
           normalize_list () {
             echo "$1" | tr ',\n' '  ' | xargs -n1 echo | sed '/^$/d'
           }
@@ -77,17 +76,14 @@ jobs:
           echo "All target tags:"
           echo "$TARGETS"
 
-          # Simple tag validation: letters, digits, _, ., -
           TAG_REGEX='^[A-Za-z0-9_.-]+$'
-
           echo "$SOURCE_TAG" | grep -Eq "$TAG_REGEX" || { echo "Invalid source tag '$SOURCE_TAG'"; exit 1; }
           while IFS= read -r t; do
             echo "$t" | grep -Eq "$TAG_REGEX" || { echo "Invalid target tag '$t'"; exit 1; }
           done <<<"$TARGETS"
 
-          # Export targets (multiline) to outputs
           {
-            echo "targets<<'EOF'"
+            echo "targets<<EOF"
             echo "$TARGETS"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
@@ -103,7 +99,6 @@ jobs:
             exit 1
           fi
           echo "Source digest: $(crane digest "$SRC_REF")"
-          # jq may not be preinstalled; crane manifest is still useful without jq
           crane manifest "$SRC_REF" 2>/dev/null | jq -r '.mediaType' || true
 
       - name: Promote tags (with retry)
