@@ -49,8 +49,11 @@ jobs:
       - name: Install crane
         uses: imjasonh/setup-crane@v0.3
 
-      - name: Install skopeo
-        uses: redhat-actions/skopeo-tools@v1
+      - name: Install skopeo (apt)
+        run: |
+          set -eo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo
 
       - name: Login crane to Harbor
         run: |
@@ -124,7 +127,6 @@ jobs:
           echo "Probing WWW-Authenticate challenge for source manifest"
           wa_hdr="$(curl -sSI "https://${repo}/manifests/${tag}" | tr -d '\r' | grep -i '^WWW-Authenticate:' || true)"
           if [ -z "$wa_hdr" ]; then
-            # Some registries return 401 without header on the first try; still attempt later with crane
             echo "No WWW-Authenticate header found; will rely on crane for source probing."
             echo "proceed=yes" >> "$GITHUB_OUTPUT"
             echo "registry_health_code=${v2_code}" >> "$GITHUB_OUTPUT"
@@ -132,8 +134,6 @@ jobs:
             exit 0
           fi
 
-          # Parse realm, service, scope from header
-          # Example: WWW-Authenticate: Bearer realm="https://hub.opensciencegrid.org/service/token",service="harbor-registry",scope="repository:osg-htc/perfsonar-testpoint:pull"
           parse_param () { echo "$wa_hdr" | sed -n "s/.*$1=\"\\([^\"]*\\)\".*/\\1/p"; }
           realm="$(parse_param realm)"
           service="$(parse_param service)"
@@ -163,7 +163,6 @@ jobs:
             "${manifest_url}")" || src_code="000"
           echo "Source manifest HTTP code: ${src_code}"
 
-          # Classify
           class="unknown"
           case "${src_code}" in
             200|301|302|307) class="ok" ;;
@@ -186,7 +185,6 @@ jobs:
             exit 1
           fi
 
-          # Proceed on ok, server_error, rate_limited, network_error, other
           echo "proceed=yes" >> "$GITHUB_OUTPUT"
 
       - name: Promote tags with retry and fallbacks
