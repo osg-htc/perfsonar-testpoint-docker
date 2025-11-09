@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Build a small patch layer on top of the upstream image.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -5,57 +6,45 @@ FROM ${BASE_IMAGE}
 # Copy snippet with pure Apache 2.4 restrictions
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
-RUN set -eux; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2; \
-    a2enmod proxy proxy_http; \
+# Use BuildKit cache mounts for apt to speed rebuilds
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    # Install apache2 only if not already present
+    if ! command -v apache2ctl >/dev/null 2>&1; then \
+      apt-get update; \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2; \
+    fi; \
+    a2enmod proxy proxy_http || true; \
     \
     # Inject OSG restrictions into the SSL vhost (idempotent)
     CONF=/etc/apache2/sites-available/default-ssl.conf; \
-    if grep -q 'BEGIN OSG restrictions' "$CONF"; then \
-        echo "Restrictions already present; skipping injection"; \
-    else \
-        DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
-        if [ -n "$DR_LINE" ]; then \
-            sed -i "${DR_LINE}r /tmp/osg-restrictions.conf" "$CONF"; \
-        else \
-            cat /tmp/osg-restrictions.conf >> "$CONF"; \
-        fi; \
+    if ! grep -q 'BEGIN OSG restrictions' "$CONF"; then \
+      DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
+      if [ -n "$DR_LINE" ]; then \
+        sed -i "${DR_LINE}r /tmp/osg-restrictions.conf" "$CONF"; \
+      else \
+        cat /tmp/osg-restrictions.conf >> "$CONF"; \
+      fi; \
     fi; \
     \
-    # BEFORE change: show current ports.conf
-    echo '--- Original ports.conf ---'; \
-    cat /etc/apache2/ports.conf || true; \
+    # Disable HTTP on port 80: drop any Listen 80 style lines
+    echo '--- Original ports.conf ---' && cat /etc/apache2/ports.conf || true; \
+    awk '!/^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)/' /etc/apache2/ports.conf > /etc/apache2/ports.conf.new; \
+    mv /etc/apache2/ports.conf.new /etc/apache2/ports.conf; \
+    echo '--- Modified ports.conf ---' && cat /etc/apache2/ports.conf; \
     \
-    # Disable HTTP on port 80: remove all Listen 80 style lines (including host:80 forms)
-    TMP_PORTS=/etc/apache2/ports.conf.new; \
-    awk '!/^[[:space:]]*Listen[[:space:]]+([0-9.:]*:)?80([[:space:]]|$)/' /etc/apache2/ports.conf > "$TMP_PORTS"; \
-    mv "$TMP_PORTS" /etc/apache2/ports.conf; \
-    \
-    # AFTER change: show modified ports.conf
-    echo '--- Modified ports.conf ---'; \
-    cat /etc/apache2/ports.conf; \
-    \
-    # Add a global ServerName to suppress warning
-    if ! grep -q '^ServerName ' /etc/apache2/apache2.conf; then \
-        echo 'ServerName localhost' >> /etc/apache2/apache2.conf; \
-    fi; \
-    \
-    # Disable default HTTP site (idempotent) and remove source & enabled copies
+    # Disable default HTTP site on port 80 (idempotent)
     a2dissite 000-default >/dev/null 2>&1 || true; \
-    rm -f /etc/apache2/sites-enabled/000-default.conf || true; \
-    rm -f /etc/apache2/sites-available/000-default.conf || true; \
+    rm -f /etc/apache2/sites-enabled/000-default.conf /etc/apache2/sites-available/000-default.conf || true; \
     \
-    # Ensure SSL site is enabled
+    # Ensure SSL site is enabled, add ServerName to quiet warning
     a2ensite default-ssl >/dev/null 2>&1 || true; \
+    grep -q '^ServerName ' /etc/apache2/apache2.conf || echo 'ServerName localhost' >> /etc/apache2/apache2.conf; \
     \
-    # Validate Apache configuration (will fail if syntax bad)
+    # Validate
     apache2ctl -t; \
+    echo '--- Listen directives after changes ---' && grep -R "^[[:space:]]*Listen" /etc/apache2 || true; \
     \
-    # Show effective listening directives (for verification)
-    echo '--- post-validation grep for Listen ---'; \
-    grep -R "^[[:space:]]*Listen" /etc/apache2 || true; \
-    \
-    # Cleanup
-    rm -f /tmp/osg-restrictions.conf; \
-    apt-get clean; rm -rf /var/lib/apt/lists/*
+    # Cleanup (apt lists are on cache mounts; this keeps the image clean)
+    rm -f /tmp/osg-restrictions.conf
