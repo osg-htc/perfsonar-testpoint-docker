@@ -196,7 +196,7 @@ jobs:
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
           [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
 
-      - name: Build patched image (single arch)
+      - name: Build patched image (single arch) with cache
         if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
         run: |
@@ -210,7 +210,7 @@ jobs:
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
           docker buildx build \
-            --build-context base=docker-daemon:local/perfsonar-testpoint:${META} \
+            --build-arg BASE_IMAGE="local/perfsonar-testpoint:${META}" \
             --build-arg PATCH_REV="${{ github.run_number }}" \
             --cache-from type=gha,scope=${CACHE_SCOPE} \
             --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
