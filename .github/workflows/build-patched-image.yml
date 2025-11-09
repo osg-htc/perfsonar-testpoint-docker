@@ -41,48 +41,50 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout this repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Resolve and validate upstream tag
-        id: tag_resolve
+      - name: Resolve upstream tag
+        id: resolve_tag
         shell: bash
         run: |
           set -euo pipefail
           REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
-          REQ='${{ github.event.inputs.upstream_tag }}'
-          if [ -z "$REQ" ]; then
-            echo "No upstream_tag specified; will clone default branch."
-            echo "resolved_ref=" >> "$GITHUB_OUTPUT"
+          INPUT='${{ github.event.inputs.upstream_tag }}'
+          if [ -z "$INPUT" ]; then
+            echo "No upstream_tag supplied; using default branch."
+            echo "resolved=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git ls-remote --tags "$REPO" | grep -q "refs/tags/${REQ}$"; then
-            RES="$REQ"
-          elif [[ "$REQ" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && \
-               git ls-remote --tags "$REPO" | grep -q "refs/tags/v${REQ}$"; then
-            RES="v${REQ}"
+          # Direct match
+          if git ls-remote --tags "$REPO" | grep -q "refs/tags/${INPUT}$"; then
+            RES="$INPUT"
+          # Try v-prefix
+          elif [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-systemd)?$ ]] && git ls-remote --tags "$REPO" | grep -q "refs/tags/v${INPUT}$"; then
+            RES="v${INPUT}"
           else
-            echo "ERROR: Could not find upstream tag matching '$REQ' (tried exact and v-prefixed)" >&2
-            git ls-remote --tags "$REPO" | awk -F/ '{print $NF}' | tail -n 15 >&2
+            echo "ERROR: Upstream tag '${INPUT}' not found (exact or v-prefixed)." >&2
+            git ls-remote --tags "$REPO" | awk -F/ '{print $NF}' | tail -n 20 >&2
             exit 1
           fi
           echo "Resolved upstream tag: $RES"
-          echo "resolved_ref=$RES" >> "$GITHUB_OUTPUT"
+          echo "resolved=$RES" >> "$GITHUB_OUTPUT"
 
       - name: Clone upstream source
         shell: bash
         run: |
           set -eux
           REPO="https://github.com/perfsonar/perfsonar-testpoint-docker"
-          REF='${{ steps.tag_resolve.outputs.resolved_ref }}'
-          if [ -z "$REF" ]; then
+          TAG='${{ steps.resolve_tag.outputs.resolved }}'
+          if [ -z "$TAG" ]; then
             git clone --depth=1 "$REPO" upstream
           else
             git init upstream
             git -C upstream remote add origin "$REPO"
-            git -C upstream fetch --depth=1 origin "refs/tags/$REF:refs/tags/$REF"
-            git -C upstream checkout -q "tags/$REF"
+            git -C upstream fetch --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+            git -C upstream checkout -q "tags/$TAG"
           fi
+          echo "HEAD commit:"
           git -C upstream rev-parse --short HEAD
 
       - name: Determine meta version
@@ -90,11 +92,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG='${{ steps.tag_resolve.outputs.resolved_ref }}'
+          TAG='${{ steps.resolve_tag.outputs.resolved }}'
           VERSION=""
-          if [ -n "$TAG" ]; then
-            VERSION="${TAG#v}"
-          fi
+          [ -n "$TAG" ] && VERSION="${TAG#v}"
           if [ -z "$VERSION" ] && [ -f upstream/VERSION ]; then
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
@@ -104,46 +104,49 @@ jobs:
           if [ -z "$VERSION" ]; then
             VERSION="$(date -u +%Y.%m.%d)"
           fi
-          echo "meta_version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Meta version chosen: $VERSION"
+          echo "META version: $VERSION"
+          echo "meta=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Select final version
-        id: version_select
+      - name: Select final published version
+        id: final
         shell: bash
         run: |
           set -euo pipefail
           FORCE='${{ github.event.inputs.force_version }}'
-          META='${{ steps.meta.outputs.meta_version }}'
+          META='${{ steps.meta.outputs.meta }}'
           if [ -n "$FORCE" ]; then
             FINAL="$FORCE"
           else
             FINAL="$META"
           fi
           if [ -z "$FORCE" ] && echo "$FINAL" | grep -Eq '^[0-9]+\.[0-9]+$'; then
-            echo "ERROR: Computed version '$FINAL' looks like a distro release; use force_version to override." >&2
+            echo "ERROR: Version '$FINAL' looks like a distro release; override with force_version." >&2
             exit 1
           fi
+          echo "Final version tag: $FINAL"
           echo "version=$FINAL" >> "$GITHUB_OUTPUT"
 
-      - name: Show chosen parameters
+      - name: Show parameters
         shell: bash
         run: |
-          echo "Resolved upstream tag: '${{ steps.tag_resolve.outputs.resolved_ref }}'"
+          echo "Resolved upstream tag: '${{ steps.resolve_tag.outputs.resolved }}'"
+          echo "META version: '${{ steps.meta.outputs.meta }}'"
+          echo "Final version: '${{ steps.final.outputs.version }}'"
           echo "Variant: '${{ github.event.inputs.variant }}'"
-          echo "Platform mode: '${{ github.event.inputs.platform }}'"
-          echo "Final version tag: '${{ steps.version_select.outputs.version }}'"
+          echo "Platform: '${{ github.event.inputs.platform }}'"
 
-      - name: Set up Docker Buildx
+      - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build upstream base image(s) with cache
+      - name: Build upstream base image(s)
+        id: upstream_build
         shell: bash
         run: |
           set -eux
           VARIANT='${{ github.event.inputs.variant }}'
-          META='${{ steps.meta.outputs.meta_version }}'
-          DOCKERFILE_PATH="Dockerfile"
-          [ "$VARIANT" = "systemd" ] && DOCKERFILE_PATH="systemd/Dockerfile"
+          META='${{ steps.meta.outputs.meta }}'
+          DOCKERFILE="Dockerfile"
+          [ "$VARIANT" = "systemd" ] && DOCKERFILE="systemd/Dockerfile"
           CACHE_SCOPE="osg-upstream-${VARIANT}"
 
           if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
@@ -154,7 +157,7 @@ jobs:
                 --cache-from type=gha,scope=${CACHE_SCOPE} \
                 --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
                 --load \
-                -f "upstream/${DOCKERFILE_PATH}" \
+                -f "upstream/${DOCKERFILE}" \
                 -t "local/perfsonar-testpoint:${META}-${ARCH}" \
                 upstream
             done
@@ -168,41 +171,39 @@ jobs:
               --cache-from type=gha,scope=${CACHE_SCOPE} \
               --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
               --load \
-              -f "upstream/${DOCKERFILE_PATH}" \
+              -f "upstream/${DOCKERFILE}" \
               -t "local/perfsonar-testpoint:${META}" \
               upstream
           fi
 
-      - name: Verify local upstream base exists (fail fast)
-        if: ${{ github.event.inputs.platform != 'both' }}
+      - name: Verify upstream image(s) exist
         shell: bash
         run: |
           set -euo pipefail
-          META='${{ steps.meta.outputs.meta_version }}'
-          docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null
+          META='${{ steps.meta.outputs.meta }}'
+          if [ '${{ github.event.inputs.platform }}' = 'both' ]; then
+            docker image inspect "local/perfsonar-testpoint:${META}-amd64" >/dev/null || { echo "Missing amd64 upstream image"; exit 1; }
+            docker image inspect "local/perfsonar-testpoint:${META}-arm64" >/dev/null || { echo "Missing arm64 upstream image"; exit 1; }
+          else
+            docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null || { echo "Missing single-arch upstream image"; exit 1; }
+          fi
+          echo "Listing local perfsonar images:"
+          docker images --format '{{.Repository}}:{{.Tag}}' | grep '^local/perfsonar-testpoint' || true
 
-      - name: Verify local upstream base exists (multi-arch, amd64)
-        if: ${{ github.event.inputs.platform == 'both' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          META='${{ steps.meta.outputs.meta_version }}'
-          docker image inspect "local/perfsonar-testpoint:${META}-amd64" >/dev/null
-
-      - name: Verify patched build context files
+      - name: Verify patch artifacts
         shell: bash
         run: |
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
           [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
 
-      - name: Build patched image (single arch) with cache (FROM base context)
+      - name: Build patched image (single arch)
         if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
         run: |
           set -eux
           VARIANT='${{ github.event.inputs.variant }}'
-          META='${{ steps.meta.outputs.meta_version }}'
-          FINAL='${{ steps.version_select.outputs.version }}'
+          META='${{ steps.meta.outputs.meta }}'
+          FINAL='${{ steps.final.outputs.version }}'
           CACHE_SCOPE="osg-patch-${VARIANT}"
           EXTRA_TAG=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
@@ -220,19 +221,20 @@ jobs:
             --load \
             .
 
-      - name: Build & push patched image (multi-arch) with cache (derives from amd64 only)
+      - name: Build & push patched image (multi-arch)
         if: ${{ github.event.inputs.platform == 'both' }}
         shell: bash
         run: |
           set -eux
           VARIANT='${{ github.event.inputs.variant }}'
-          META='${{ steps.meta.outputs.meta_version }}'
-          FINAL='${{ steps.version_select.outputs.version }}'
+          META='${{ steps.meta.outputs.meta }}'
+          FINAL='${{ steps.final.outputs.version }}'
           CACHE_SCOPE="osg-patch-${VARIANT}"
           EXTRA_TAGS=""
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
             EXTRA_TAGS="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
+          # NOTE: still derives from the amd64 base only (improves later)
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-context base=docker-daemon:local/perfsonar-testpoint:${META}-amd64 \
@@ -245,7 +247,7 @@ jobs:
             ${EXTRA_TAGS} \
             --push \
             .
-          echo "NOTE: Multi-arch patch currently derives from the amd64 upstream base only."
+          echo "WARNING: Multi-arch patch uses amd64 upstream only; not true per-arch patch."
 
       - name: Login to Harbor
         uses: docker/login-action@v3
@@ -254,12 +256,12 @@ jobs:
           username: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
           password: ${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}
 
-      - name: Push single-arch images
+      - name: Push single-arch tags
         if: ${{ github.event.inputs.platform != 'both' }}
         shell: bash
         run: |
           set -eux
-          FINAL='${{ steps.version_select.outputs.version }}'
+          FINAL='${{ steps.final.outputs.version }}'
           docker push "${REGISTRY}/${IMAGE_REPO}:${FINAL}"
           docker push "${REGISTRY}/${IMAGE_REPO}:latest"
           if [ "${{ github.event.inputs.env_tag }}" != "" ] && [ "${{ github.event.inputs.env_tag }}" != "none" ]; then
@@ -269,7 +271,8 @@ jobs:
       - name: Summary
         shell: bash
         run: |
-          echo "Final published version: ${{ steps.version_select.outputs.version }}"
-          echo "Variant: ${{ github.event.inputs.variant }}"
-          echo "Platform: ${{ github.event.inputs.platform }}"
-          echo "Upstream tag: '${{ steps.tag_resolve.outputs.resolved_ref }}'"
+          echo "Upstream tag: '${{ steps.resolve_tag.outputs.resolved }}'"
+          echo "META version: '${{ steps.meta.outputs.meta }}'"
+          echo "Final published version: '${{ steps.final.outputs.version }}'"
+          echo "Variant: '${{ github.event.inputs.variant }}'"
+          echo "Platform: '${{ github.event.inputs.platform }}'"
