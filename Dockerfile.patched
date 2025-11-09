@@ -1,21 +1,21 @@
 # syntax=docker/dockerfile:1.7
 #
 # This Dockerfile expects a BuildKit build context named 'base'
-# supplied via: --build-context base=local-image://local/perfsonar-testpoint:<version>
+# supplied via: --build-context base=docker-daemon:local/perfsonar-testpoint:<version>
 #
-# Cache busting: pass --build-arg PATCH_REV=<increment or github.run_number>
+# Cache busting: pass --build-arg PATCH_REV=<github.run_number>
 
 ARG PATCH_REV=1
 FROM base
 
-# Re-declare ARG so it's available inside the stage
+# Make sure PATCH_REV is available in this stage
 ARG PATCH_REV
 ENV PATCH_REV=${PATCH_REV}
 
 # Copy restriction snippet
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 
-# Patch layer: Apache injection + disable port 80
+# Patch layer: Apache injection + disable port 80 (idempotent + logged)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     set -eux; \
