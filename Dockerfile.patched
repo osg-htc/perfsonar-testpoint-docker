@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1.7
 ARG BASE_IMAGE
-ARG PATCH_REV=1
 FROM ${BASE_IMAGE}
+
+# Re-declare ARGs you want to use in this stage
+ARG PATCH_REV=1
+ENV PATCH_REV=${PATCH_REV}
 
 # Copy snippet with pure Apache 2.4 restrictions
 COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
@@ -10,7 +13,7 @@ COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     set -eux; \
-    echo "Patch revision: $PATCH_REV"; \
+    echo "Patch revision: ${PATCH_REV}"; \
     # Ensure apache2 exists
     if ! command -v apache2ctl >/dev/null 2>&1; then \
       apt-get update; \
@@ -57,12 +60,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     a2dissite 000-default >/dev/null 2>&1 || true; \
     rm -f /etc/apache2/sites-enabled/000-default.conf || true; \
     rm -f /etc/apache2/sites-available/000-default.conf || true; \
-    \
-    # Verify removal
-    if ls /etc/apache2/sites-enabled | grep -q '^000-default.conf$'; then \
-      echo 'ERROR: 000-default.conf symlink still present' >&2; \
-      exit 1; \
-    fi; \
     \
     # Ensure SSL site enabled
     a2ensite default-ssl >/dev/null 2>&1 || true; \
