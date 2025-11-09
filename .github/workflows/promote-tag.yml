@@ -1,19 +1,32 @@
-name: Promote tag (production/test) without rebuild
+name: Promote image tag(s) without rebuild (arbitrary targets)
 
 on:
   workflow_dispatch:
     inputs:
       source_tag:
-        description: "Existing tag to promote (e.g., a version or 'latest')"
+        description: "Existing source tag to promote (e.g. 5.2.3, latest)"
         required: true
         default: "latest"
       target_tag:
-        description: "Target tag to apply (production or test)"
+        description: "Primary target tag (e.g. production, staging, perfsonar-5.2.3)"
         required: true
+        default: "production"
+      additional_tags:
+        description: "Optional extra target tags (space or comma separated)"
+        required: false
+        default: ""
+      dry_run:
+        description: "If true, do not actually copy; just show what would happen"
+        required: false
         type: choice
         options:
-          - production
-          - test
+          - "false"
+          - "true"
+        default: "false"
+      max_retries:
+        description: "Max retries for each copy (default 5)"
+        required: false
+        default: "5"
 
 env:
   REGISTRY: hub.opensciencegrid.org
@@ -22,31 +35,141 @@ env:
 jobs:
   promote:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      - name: Show parameters
+        run: |
+          echo "Source tag:        ${{ github.event.inputs.source_tag }}"
+          echo "Primary target:    ${{ github.event.inputs.target_tag }}"
+          echo "Additional targets: ${{ github.event.inputs.additional_tags }}"
+          echo "Dry run:           ${{ github.event.inputs.dry_run }}"
+          echo "Max retries:       ${{ github.event.inputs.max_retries }}"
+
       - name: Install crane
         uses: imjasonh/setup-crane@v0.3
 
       - name: Login to Harbor
         run: |
+          set -euo pipefail
           crane auth login "$REGISTRY" \
             -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
             -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
 
-      - name: Copy tag by digest (no rebuild)
+      - name: Prepare tag list & validate
+        id: prep
         env:
           SOURCE_TAG: ${{ github.event.inputs.source_tag }}
           TARGET_TAG: ${{ github.event.inputs.target_tag }}
+          ADDITIONAL_TAGS_RAW: ${{ github.event.inputs.additional_tags }}
         run: |
-          set -eo pipefail
-          SRC="${REGISTRY}/${IMAGE_REPO}:${SOURCE_TAG}"
-          DST="${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}"
-          echo "Promoting ${SRC} -> ${DST}"
-          crane copy "$SRC" "$DST"
+          set -euo pipefail
+          REGEX='^[A-Za-z0-9_.-]+$'
+          normalize_list () {
+            echo "$1" | tr ',\n' '  ' | xargs -n1 echo | sed '/^$/d'
+          }
+          TARGETS="$(normalize_list "$TARGET_TAG")"
+          if [ -n "$ADDITIONAL_TAGS_RAW" ]; then
+            EXTRA="$(normalize_list "$ADDITIONAL_TAGS_RAW")"
+            TARGETS="$(printf "%s\n%s" "$TARGETS" "$EXTRA" | sed '/^$/d')"
+          fi
+          echo "All target tags:"
+          echo "$TARGETS"
+          # Validate
+            echo "$SOURCE_TAG" | grep -Eq "$REGEX" || { echo "Invalid source tag '$SOURCE_TAG'"; exit 1; }
+          while IFS= read -r t; do
+            echo "$t" | grep -Eq "$REGEX" || { echo "Invalid target tag '$t'"; exit 1; }
+          done <<<"$TARGETS"
+          # Export multiline list (GitHub multiline needs special escaping)
+          { echo "targets<<EOF"; echo "$TARGETS"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
-      - name: Verify promoted tag
+      - name: Verify source manifest
         env:
-          TARGET_TAG: ${{ github.event.inputs.target_tag }}
+          SOURCE_TAG: ${{ github.event.inputs.source_tag }}
         run: |
-          set -eo pipefail
-          echo "Digest of ${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}:"
-          crane digest "${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}"
+          set -euo pipefail
+          SRC="${REGISTRY}/${IMAGE_REPO}:${SOURCE_TAG}"
+          echo "Checking source: $SRC"
+          DIGEST=$(crane digest "$SRC" 2>/dev/null || true)
+          if [ -z "$DIGEST" ]; then
+            echo "ERROR: Source tag '$SOURCE_TAG' not found." >&2
+            exit 1
+          fi
+          echo "Source digest: $DIGEST"
+          MT=$(crane manifest "$SRC" | jq -r '.mediaType')
+          echo "Source media type: $MT"
+
+      - name: Promote tags (with retry)
+        env:
+          SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_RETRIES: ${{ github.event.inputs.max_retries }}
+          TARGET_LIST: ${{ steps.prep.outputs.targets }}
+        run: |
+          set -euo pipefail
+          SRC="${REGISTRY}/${IMAGE_REPO}:${SOURCE_TAG}"
+          echo "Starting promotion from $SRC"
+          SUCCESS=0
+          FAILED=0
+          while IFS= read -r TGT; do
+            [ -z "$TGT" ] && continue
+            DST="${REGISTRY}/${IMAGE_REPO}:${TGT}"
+            echo "----"
+            echo "Promoting to $DST"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "(dry-run) Would run: crane copy '$SRC' '$DST'"
+              SUCCESS=$((SUCCESS+1))
+              continue
+            fi
+            attempts=0
+            max_attempts=${MAX_RETRIES:-5}
+            while true; do
+              if crane copy "$SRC" "$DST"; then
+                echo "Copy succeeded (target: $DST, attempt: $((attempts+1)))"
+                SUCCESS=$((SUCCESS+1))
+                break
+              else
+                attempts=$((attempts+1))
+                if [ $attempts -ge $max_attempts ]; then
+                  echo "ERROR: Failed to copy to $DST after $attempts attempts" >&2
+                  FAILED=$((FAILED+1))
+                  break
+                fi
+                sleep_sec=$((2 ** attempts))
+                echo "Retry $attempts/$max_attempts in ${sleep_sec}s ..."
+                sleep $sleep_sec
+              fi
+            done
+          done <<<"$TARGET_LIST"
+          echo "----"
+          echo "Promotion summary: success=$SUCCESS failed=$FAILED"
+          [ $FAILED -eq 0 ] || { echo "Some promotions failed."; exit 1; }
+
+      - name: Verify promoted tags
+        if: ${{ github.event.inputs.dry_run == 'false' }}
+        env:
+          SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+          TARGET_LIST: ${{ steps.prep.outputs.targets }}
+        run: |
+          set -euo pipefail
+          SRC="${REGISTRY}/${IMAGE_REPO}:${SOURCE_TAG}"
+          SRC_DIGEST=$(crane digest "$SRC")
+          echo "Source digest: $SRC_DIGEST"
+          while IFS= read -r TGT; do
+            [ -z "$TGT" ] && continue
+            DST="${REGISTRY}/${IMAGE_REPO}:${TGT}"
+            DST_DIGEST=$(crane digest "$DST" 2>/dev/null || true)
+            if [ -z "$DST_DIGEST" ]; then
+              echo "ERROR: Promoted tag missing: $DST" >&2
+              exit 1
+            fi
+            echo "Tag: $TGT Digest: $DST_DIGEST MatchSource: $([ "$DST_DIGEST" = "$SRC_DIGEST" ] && echo yes || echo no)"
+          done <<<"$TARGET_LIST"
+
+      - name: Summary
+        run: |
+          echo "Promotion complete."
+          echo "Source: ${{ github.event.inputs.source_tag }}"
+          echo "Primary target: ${{ github.event.inputs.target_tag }}"
+          echo "Additional targets: ${{ github.event.inputs.additional_tags }}"
+          echo "Dry run: ${{ github.event.inputs.dry_run }}"
