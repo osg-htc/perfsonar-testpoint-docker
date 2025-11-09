@@ -19,8 +19,10 @@ on:
         description: "If true, do not actually copy; just show what would happen"
         required: false
         type: choice
-        options: ["false","true"]
-        default: "false"
+        options:
+          - false
+          - true
+        default: false
       max_retries:
         description: "Max retries for each copy (default 5)"
         required: false
@@ -82,13 +84,11 @@ jobs:
             echo "$t" | grep -Eq "$TAG_REGEX" || { echo "Invalid target tag '$t'"; exit 1; }
           done <<<"$TARGETS"
 
-          {
-            echo "targets<<EOF"
-            echo "$TARGETS"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "targets<<EOF" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-flight: verify source manifest
+      - name: Pre-flight verify source manifest
         env:
           SRC_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.event.inputs.source_tag }}
         run: |
