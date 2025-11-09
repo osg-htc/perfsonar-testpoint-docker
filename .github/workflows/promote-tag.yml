@@ -20,9 +20,9 @@ on:
         required: false
         type: choice
         options:
-          - false
-          - true
-        default: false
+          - "false"
+          - "true"
+        default: "false"
       max_retries:
         description: "Max retries for each copy (default 5)"
         required: false
@@ -49,14 +49,31 @@ jobs:
       - name: Install crane
         uses: imjasonh/setup-crane@v0.3
 
-      - name: Login to Harbor
+      - name: Install skopeo
+        uses: redhat-actions/skopeo-tools@v1
+
+      - name: Login crane to Harbor
         run: |
           set -eo pipefail
           crane auth login "$REGISTRY" \
             -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
             -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
 
-      - name: Prepare tag list & validate
+      - name: Login skopeo to Harbor
+        run: |
+          set -eo pipefail
+          skopeo login "$REGISTRY" \
+            -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
+            -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
+
+      - name: Login docker to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
+          password: ${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}
+
+      - name: Prepare tag list and validate
         id: prep
         env:
           SOURCE_TAG: ${{ github.event.inputs.source_tag }}
@@ -64,44 +81,116 @@ jobs:
           ADDITIONAL_TAGS_RAW: ${{ github.event.inputs.additional_tags }}
         run: |
           set -eo pipefail
-
           normalize_list () {
             echo "$1" | tr ',\n' '  ' | xargs -n1 echo | sed '/^$/d'
           }
-
           TARGETS="$(normalize_list "$TARGET_TAG")"
           if [ -n "$ADDITIONAL_TAGS_RAW" ]; then
             EXTRA="$(normalize_list "$ADDITIONAL_TAGS_RAW")"
             TARGETS="$(printf "%s\n%s\n" "$TARGETS" "$EXTRA" | sed '/^$/d')"
           fi
-
           echo "All target tags:"
           echo "$TARGETS"
-
           TAG_REGEX='^[A-Za-z0-9_.-]+$'
           echo "$SOURCE_TAG" | grep -Eq "$TAG_REGEX" || { echo "Invalid source tag '$SOURCE_TAG'"; exit 1; }
           while IFS= read -r t; do
             echo "$t" | grep -Eq "$TAG_REGEX" || { echo "Invalid target tag '$t'"; exit 1; }
           done <<<"$TARGETS"
-
           echo "targets<<EOF" >> "$GITHUB_OUTPUT"
           printf "%s\n" "$TARGETS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-flight verify source manifest
+      - name: Preflight classify source and registry health
+        id: classify
         env:
-          SRC_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.event.inputs.source_tag }}
+          REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}
+          SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+          HARBOR_USER: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
+          HARBOR_PASS: ${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}
         run: |
           set -eo pipefail
-          echo "Checking source: $SRC_REF"
-          if ! crane digest "$SRC_REF" >/dev/null 2>&1; then
-            echo "ERROR: Source tag not found: $SRC_REF" >&2
+          set +x
+
+          repo="${REPO}"
+          tag="${SOURCE_TAG}"
+          manifest_url="https://${repo}/manifests/${tag}"
+          v2_url="https://${{ env.REGISTRY }}/v2/"
+          accept_hdr="application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json"
+
+          echo "Checking /v2/ registry endpoint"
+          v2_code="$(curl -sS -o /dev/null -w "%{http_code}" "${v2_url}")" || v2_code="000"
+          echo "Registry /v2/ HTTP code: ${v2_code}"
+
+          echo "Probing WWW-Authenticate challenge for source manifest"
+          wa_hdr="$(curl -sSI "https://${repo}/manifests/${tag}" | tr -d '\r' | grep -i '^WWW-Authenticate:' || true)"
+          if [ -z "$wa_hdr" ]; then
+            # Some registries return 401 without header on the first try; still attempt later with crane
+            echo "No WWW-Authenticate header found; will rely on crane for source probing."
+            echo "proceed=yes" >> "$GITHUB_OUTPUT"
+            echo "registry_health_code=${v2_code}" >> "$GITHUB_OUTPUT"
+            echo "source_status_class=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Parse realm, service, scope from header
+          # Example: WWW-Authenticate: Bearer realm="https://hub.opensciencegrid.org/service/token",service="harbor-registry",scope="repository:osg-htc/perfsonar-testpoint:pull"
+          parse_param () { echo "$wa_hdr" | sed -n "s/.*$1=\"\\([^\"]*\\)\".*/\\1/p"; }
+          realm="$(parse_param realm)"
+          service="$(parse_param service)"
+          scope="repository:${repo#${{ env.REGISTRY }}/}:pull"
+
+          if [ -z "$realm" ] || [ -z "$service" ]; then
+            echo "Could not parse auth challenge; proceeding without classification."
+            echo "proceed=yes" >> "$GITHUB_OUTPUT"
+            echo "registry_health_code=${v2_code}" >> "$GITHUB_OUTPUT"
+            echo "source_status_class=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Fetching Bearer token"
+          token="$(curl -sS --user "${HARBOR_USER}:${HARBOR_PASS}" "${realm}?service=$(printf %s "$service" | sed 's/ /%20/g')&scope=$(printf %s "$scope" | sed 's/:/%3A/g')" | jq -r '.token // empty')"
+          if [ -z "$token" ]; then
+            echo "Failed to obtain Bearer token; classification cannot continue."
+            echo "proceed=no" >> "$GITHUB_OUTPUT"
+            echo "source_status_class=auth_error" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          echo "Source digest: $(crane digest "$SRC_REF")"
-          crane manifest "$SRC_REF" 2>/dev/null | jq -r '.mediaType' || true
 
-      - name: Promote tags (with retry)
+          echo "HEAD source manifest with Authorization and Accept"
+          src_code="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: ${accept_hdr}" \
+            "${manifest_url}")" || src_code="000"
+          echo "Source manifest HTTP code: ${src_code}"
+
+          # Classify
+          class="unknown"
+          case "${src_code}" in
+            200|301|302|307) class="ok" ;;
+            401|403) class="auth_error" ;;
+            404) class="not_found" ;;
+            429) class="rate_limited" ;;
+            5*) class="server_error" ;;
+            000) class="network_error" ;;
+            *) class="other" ;;
+          esac
+          echo "source_status_class=${class}" >> "$GITHUB_OUTPUT"
+          echo "registry_health_code=${v2_code}" >> "$GITHUB_OUTPUT"
+
+          if [ "${class}" = "not_found" ]; then
+            echo "ERROR: Source tag not found on registry. Failing fast."
+            exit 1
+          fi
+          if [ "${class}" = "auth_error" ]; then
+            echo "ERROR: Authentication/authorization problem. Failing fast."
+            exit 1
+          fi
+
+          # Proceed on ok, server_error, rate_limited, network_error, other
+          echo "proceed=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Promote tags with retry and fallbacks
+        if: steps.classify.outputs.proceed == 'yes'
         env:
           SRC_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.event.inputs.source_tag }}
           TARGET_LIST: ${{ steps.prep.outputs.targets }}
@@ -112,42 +201,76 @@ jobs:
           echo "Promoting from: $SRC_REF"
           SUCCESS=0
           FAILED=0
+
+          try_crane_copy () {
+            local src="$1"; local dst="$2"; local max_attempts="$3"
+            local attempts=0
+            while true; do
+              if crane copy "$src" "$dst"; then
+                echo "crane copy succeeded -> $dst"
+                return 0
+              fi
+              attempts=$((attempts+1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                echo "crane copy failed after $attempts attempts -> $dst"
+                return 1
+              fi
+              local sleep_sec=$((2 ** attempts))
+              echo "crane copy retry $attempts/$max_attempts in ${sleep_sec}s ..."
+              sleep "$sleep_sec"
+            done
+          }
+
+          try_skopeo_copy () {
+            local src="$1"; local dst="$2"
+            skopeo copy --all "docker://${src}" "docker://${dst}"
+          }
+
+          try_docker_tag_push () {
+            local src="$1"; local dst="$2"
+            docker pull "$src"
+            docker tag "$src" "$dst"
+            docker push "$dst"
+          }
+
           while IFS= read -r TGT; do
             [ -z "$TGT" ] && continue
             DST_REF="${REGISTRY}/${IMAGE_REPO}:${TGT}"
             echo "----"
             echo "Target: $DST_REF"
             if [ "$DRY_RUN" = "true" ]; then
-              echo "(dry-run) Would run: crane copy '$SRC_REF' '$DST_REF'"
+              echo "(dry-run) Would promote $SRC_REF -> $DST_REF"
               SUCCESS=$((SUCCESS+1))
               continue
             fi
-            attempts=0
-            max_attempts=${MAX_RETRIES:-5}
-            while true; do
-              if crane copy "$SRC_REF" "$DST_REF"; then
-                echo "Copy succeeded (attempt $((attempts+1)))"
-                SUCCESS=$((SUCCESS+1))
-                break
-              else
-                attempts=$((attempts+1))
-                if [ $attempts -ge $max_attempts ]; then
-                  echo "ERROR: Failed to copy to $DST_REF after $attempts attempts" >&2
-                  FAILED=$((FAILED+1))
-                  break
-                fi
-                sleep_sec=$((2 ** attempts))
-                echo "Retry $attempts/$max_attempts in ${sleep_sec}s ..."
-                sleep $sleep_sec
-              fi
-            done
+
+            if try_crane_copy "$SRC_REF" "$DST_REF" "${MAX_RETRIES:-5}"; then
+              SUCCESS=$((SUCCESS+1))
+              continue
+            fi
+
+            echo "Attempting skopeo copy fallback -> $DST_REF"
+            if try_skopeo_copy "$SRC_REF" "$DST_REF"; then
+              SUCCESS=$((SUCCESS+1))
+              continue
+            fi
+
+            echo "Attempting docker tag/push fallback -> $DST_REF"
+            if try_docker_tag_push "$SRC_REF" "$DST_REF"; then
+              SUCCESS=$((SUCCESS+1))
+              continue
+            fi
+
+            echo "ERROR: All promotion methods failed for $DST_REF" >&2
+            FAILED=$((FAILED+1))
           done <<<"$TARGET_LIST"
+
           echo "----"
           echo "Promotion summary: success=$SUCCESS failed=$FAILED"
           [ $FAILED -eq 0 ] || { echo "Some promotions failed."; exit 1; }
 
       - name: Verify promoted tags
-        if: ${{ github.event.inputs.dry_run == 'false' }}
+        if: ${{ github.event.inputs.dry_run == 'false' && steps.classify.outputs.proceed == 'yes' }}
         env:
           SRC_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.event.inputs.source_tag }}
           TARGET_LIST: ${{ steps.prep.outputs.targets }}
