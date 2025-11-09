@@ -28,19 +28,25 @@ jobs:
 
       - name: Login to Harbor
         run: |
-          set -euo pipefail
           crane auth login "$REGISTRY" \
             -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
             -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
 
       - name: Copy tag by digest (no rebuild)
+        env:
+          SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+          TARGET_TAG: ${{ github.event.inputs.target_tag }}
         run: |
-          set -euo pipefail
-          SRC="${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.source_tag }}"
-          DST="${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.target_tag }}"
+          set -eo pipefail
+          SRC="${REGISTRY}/${IMAGE_REPO}:${SOURCE_TAG}"
+          DST="${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}"
+          echo "Promoting ${SRC} -> ${DST}"
           crane copy "$SRC" "$DST"
 
       - name: Verify promoted tag
+        env:
+          TARGET_TAG: ${{ github.event.inputs.target_tag }}
         run: |
-          set -euo pipefail
-          crane digest "${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.target_tag }}"
+          set -eo pipefail
+          echo "Digest of ${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}:"
+          crane digest "${REGISTRY}/${IMAGE_REPO}:${TARGET_TAG}"
