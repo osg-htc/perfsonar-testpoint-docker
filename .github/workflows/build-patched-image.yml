@@ -98,7 +98,7 @@ jobs:
           if [ -z "$VERSION" ] && [ -f upstream/VERSION ]; then
             VERSION="$(tr -d ' \n' < upstream/VERSION)"
           fi
-            if [ -z "$VERSION" ]; then
+          if [ -z "$VERSION" ]; then
             VERSION="$(git -C upstream describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
           fi
           if [ -z "$VERSION" ]; then
@@ -173,6 +173,22 @@ jobs:
               upstream
           fi
 
+      - name: Verify local upstream base exists (fail fast)
+        if: ${{ github.event.inputs.platform != 'both' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          META='${{ steps.meta.outputs.meta_version }}'
+          docker image inspect "local/perfsonar-testpoint:${META}" >/dev/null
+
+      - name: Verify local upstream base exists (multi-arch, amd64)
+        if: ${{ github.event.inputs.platform == 'both' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          META='${{ steps.meta.outputs.meta_version }}'
+          docker image inspect "local/perfsonar-testpoint:${META}-amd64" >/dev/null
+
       - name: Verify patched build context files
         shell: bash
         run: |
@@ -193,7 +209,7 @@ jobs:
             EXTRA_TAG="-t ${REGISTRY}/${IMAGE_REPO}:${{ github.event.inputs.env_tag }}"
           fi
           docker buildx build \
-            --build-context base=local-image://local/perfsonar-testpoint:${META} \
+            --build-context base=docker-daemon:local/perfsonar-testpoint:${META} \
             --build-arg PATCH_REV="${{ github.run_number }}" \
             --cache-from type=gha,scope=${CACHE_SCOPE} \
             --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
@@ -219,7 +235,7 @@ jobs:
           fi
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --build-context base=local-image://local/perfsonar-testpoint:${META}-amd64 \
+            --build-context base=docker-daemon:local/perfsonar-testpoint:${META}-amd64 \
             --build-arg PATCH_REV="${{ github.run_number }}" \
             --cache-from type=gha,scope=${CACHE_SCOPE} \
             --cache-to   type=gha,scope=${CACHE_SCOPE},mode=max \
@@ -255,6 +271,5 @@ jobs:
         run: |
           echo "Final published version: ${{ steps.version_select.outputs.version }}"
           echo "Variant: ${{ github.event.inputs.variant }}"
-          echo "Platform: ${{
-            github.event.inputs.platform }}"
+          echo "Platform: ${{ github.event.inputs.platform }}"
           echo "Upstream tag: '${{ steps.tag_resolve.outputs.resolved_ref }}'"
