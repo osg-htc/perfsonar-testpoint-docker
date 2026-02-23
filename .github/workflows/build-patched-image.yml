@@ -4,9 +4,9 @@ name: Build and push patched perfSONAR Testpoint (minimal, single-arch)
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "Upstream tag to build from (e.g. v5.2.3 or 5.2.3). Blank = default branch."
+        description: "Upstream tag to build from (e.g. v5.2.4 or 5.2.4). Blank = default branch."
         required: false
-        default: "v5.2.3"
+        default: "v5.2.4"
       variant:
         description: "Base variant (systemd|supervisord). Minimal workflow builds single-arch only."
         required: false
