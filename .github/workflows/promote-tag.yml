@@ -62,13 +62,6 @@ jobs:
             -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
             -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
 
-      - name: Login skopeo to Harbor
-        run: |
-          set -eo pipefail
-          skopeo login "$REGISTRY" \
-            -u "${{ secrets.OSG_HARBOR_ROBOT_USER }}" \
-            -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
-
       - name: Login docker to Harbor
         uses: docker/login-action@v4
         with:
@@ -221,7 +214,7 @@ jobs:
 
           try_skopeo_copy () {
             local src="$1"; local dst="$2"
-            skopeo copy --all "docker://${src}" "docker://${dst}"
+            skopeo copy --all --authfile "${HOME}/.docker/config.json" "docker://${src}" "docker://${dst}"
           }
 
           try_docker_tag_push () {
