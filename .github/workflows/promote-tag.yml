@@ -70,7 +70,7 @@ jobs:
             -p "${{ secrets.OSG_HARBOR_ROBOT_PASSWORD }}"
 
       - name: Login docker to Harbor
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.OSG_HARBOR_ROBOT_USER }}
