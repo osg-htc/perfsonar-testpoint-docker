@@ -10,7 +10,18 @@ FROM ${BASE_IMAGE}
 ARG PATCH_REV
 ENV PATCH_REV=${PATCH_REV}
 
-COPY patches/osg-restrictions.conf /tmp/osg-restrictions.conf
+# OSG additions (see osg/):
+#  - osg-exporter-acl.conf: restricts /node_exporter, /perfsonar_host_exporter and
+#    /metrics to loopback plus the allow-list in /etc/apache2/osg/exporter-allow.conf
+#    (sites can bind-mount their own list over that file). It lives in conf-enabled,
+#    not in default-ssl.conf, so it also applies on hosts that mount their own
+#    default-ssl.conf.
+#  - osg-instance-secrets: per-container pScheduler DB password and snakeoil key,
+#    replacing the ones generated at build time (identical in every pulled image).
+COPY osg/osg-exporter-acl.conf /etc/apache2/conf-available/osg-exporter-acl.conf
+COPY osg/exporter-allow.conf /etc/apache2/osg/exporter-allow.conf
+COPY osg/osg-instance-secrets /usr/local/sbin/osg-instance-secrets
+COPY osg/osg-instance-secrets.service /etc/systemd/system/osg-instance-secrets.service
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -22,14 +33,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi; \
     a2enmod proxy proxy_http || true; \
     CONF=/etc/apache2/sites-available/default-ssl.conf; \
-    if ! grep -q 'BEGIN OSG restrictions' "$CONF"; then \
-      DR_LINE="$(grep -nE '^[[:space:]]*DocumentRoot[[:space:]]+/var/www/html' "$CONF" | head -1 | cut -d: -f1 || true)"; \
-      if [ -n "$DR_LINE" ]; then \
-        sed -i "${DR_LINE}r /tmp/osg-restrictions.conf" "$CONF"; \
-      else \
-        cat /tmp/osg-restrictions.conf >> "$CONF"; \
-      fi; \
-    fi; \
+    sed -i '/# BEGIN OSG restrictions/,/# END OSG restrictions/d' "$CONF"; \
+    a2enconf osg-exporter-acl; \
+    chmod 0755 /usr/local/sbin/osg-instance-secrets; \
+    chmod 0644 /etc/apache2/osg/exporter-allow.conf /etc/systemd/system/osg-instance-secrets.service; \
+    mkdir -p /etc/systemd/system/multi-user.target.wants; \
+    ln -sf /etc/systemd/system/osg-instance-secrets.service /etc/systemd/system/multi-user.target.wants/osg-instance-secrets.service; \
     echo '--- BEFORE ports.conf ---'; \
     cat /etc/apache2/ports.conf || true; \
     { \
@@ -55,5 +64,4 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     grep -q '^ServerName ' /etc/apache2/apache2.conf || echo 'ServerName localhost' >> /etc/apache2/apache2.conf; \
     apache2ctl -t; \
     echo '--- ACTIVE LISTENERS (grep) ---'; \
-    grep -R "^[[:space:]]*Listen" /etc/apache2 || true; \
-    rm -f /tmp/osg-restrictions.conf
+    grep -R "^[[:space:]]*Listen" /etc/apache2 || true

@@ -1,5 +1,15 @@
 # perfSONAR 5.X Testpoint docker container
 
+## OSG image (hub.opensciencegrid.org/osg-htc/perfsonar-testpoint)
+
+The OSG image is the upstream systemd testpoint with a small layer on top (`Dockerfile.patched`, files in `osg/`). Deployment instructions are at https://osg-htc.org/networking/.
+
+- **Exporter access.** `/node_exporter`, `/perfsonar_host_exporter` and `/metrics` are restricted to loopback plus the networks in `/etc/apache2/osg/exporter-allow.conf` (default: AGLT2, where the OSG/WLCG central perfSONAR monitoring runs, and CERN). The rules are in `/etc/apache2/conf-enabled/osg-exporter-acl.conf`, so they apply even where a host-side `default-ssl.conf` is mounted. To use your own list, bind-mount a file of `Require ip ...` lines over `/etc/apache2/osg/exporter-allow.conf` and reload Apache. Everything else, including pScheduler, stays open.
+- **Per-instance secrets.** At container start, `osg-instance-secrets.service` gives each container its own pScheduler database password and snakeoil TLS key, replacing the ones generated when the image was built (which every pulled image shares). A recreated container gets new ones; a restarted container keeps its own.
+- **No port 80.** Apache listens on 443 only.
+
+## Upstream
+
 Please submit problems to:
   https://github.com/perfsonar/perfsonar-testpoint-docker/issues
 
