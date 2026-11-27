@@ -155,7 +155,10 @@ jobs:
         shell: bash
         run: |
           [ -f Dockerfile.patched ] || { echo "Missing Dockerfile.patched"; exit 1; }
-          [ -f patches/osg-restrictions.conf ] || { echo "Missing patches/osg-restrictions.conf"; exit 1; }
+          [ -f osg/osg-exporter-acl.conf ] || { echo "Missing osg/osg-exporter-acl.conf"; exit 1; }
+          [ -f osg/exporter-allow.conf ] || { echo "Missing osg/exporter-allow.conf"; exit 1; }
+          [ -f osg/osg-instance-secrets ] || { echo "Missing osg/osg-instance-secrets"; exit 1; }
+          [ -f osg/osg-instance-secrets.service ] || { echo "Missing osg/osg-instance-secrets.service"; exit 1; }
 
       - name: Build patched image (single-arch, classic docker)
         shell: bash
